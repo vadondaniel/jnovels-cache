@@ -41,13 +41,40 @@ VOLUME_POST_HTML = """
 GROUPED_SERIES_HTML = """
 <article>
   <div class="post-content clear">
-    <div><strong>OFFICIAL TRANSLATION</strong></div>
+    <div><strong>OFFICIAL VERSION</strong></div>
     <ol>
       <li>Example volume 1 epub <a href="https://files.example/official-1">DOWNLOAD</a></li>
     </ol>
-    <div><strong>FAN TRANSLATION</strong></div>
+    <div><strong>FAN TRANSLATED VERSION</strong></div>
     <ol>
       <li>Example volume 1 epub <a href="https://files.example/fan-1">DOWNLOAD</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+NESTED_SERIES_HTML = """
+<article>
+  <div class="post-content clear">
+    <ol>
+      <li style="list-style-type: none;">
+        <ol>
+          <li>Volume 01 <a href="https://files.example/one">Download</a></li>
+          <li>Volume 05 <a href="https://files.example/five">Download</a></li>
+        </ol>
+      </li>
+    </ol>
+  </div>
+</article>
+"""
+
+SPECIAL_VOLUME_LABELS_HTML = """
+<article>
+  <div class="post-content clear">
+    <ol>
+      <li>VOLUME 14 <a href="https://files.example/14">DOWNLOAD</a></li>
+      <li>VOLUME 14+ <a href="https://files.example/14-plus">DOWNLOAD</a></li>
+      <li>VOLUME 14++ <a href="https://files.example/14-plus-plus">DOWNLOAD</a></li>
     </ol>
   </div>
 </article>
@@ -114,6 +141,24 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(details.download_url, "https://files.example/volume-16")
 
+    def test_accepts_original_post_link_with_article(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-volume-5-epub/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <a href="/example-light-novel-epub/">Refer to the original post</a>
+              <a href="https://files.example/five">VOLUME 05</a>
+            </div>
+            """
+        )
+
+        details = parser.details()
+        self.assertEqual(details.entry_type, "volume")
+        self.assertEqual(
+            details.original_post_url,
+            "https://jnovels.com/example-light-novel-epub/",
+        )
+
     def test_preserves_official_and_fan_translation_groups(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-series/")
         parser.feed(GROUPED_SERIES_HTML)
@@ -125,6 +170,27 @@ class ParserTests(unittest.TestCase):
                 ("Volume 1", "Official translation"),
                 ("Volume 1", "Fan translation"),
             ],
+        )
+
+    def test_extracts_each_volume_from_nested_lists(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(NESTED_SERIES_HTML)
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in parser.details().volumes],
+            [
+                ("Volume 1", "https://files.example/one"),
+                ("Volume 5", "https://files.example/five"),
+            ],
+        )
+
+    def test_preserves_meaningful_volume_suffixes(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(SPECIAL_VOLUME_LABELS_HTML)
+
+        self.assertEqual(
+            [volume.label for volume in parser.details().volumes],
+            ["Volume 14", "Volume 14+", "Volume 14++"],
         )
 
     def test_normalizes_zero_padded_volume_numbers(self):
@@ -393,6 +459,33 @@ class DatabaseTests(unittest.TestCase):
             {old_series, changed_series},
         )
         self.assertEqual(server.count_stale_series(), 2)
+
+    def test_catalog_with_ungrouped_duplicate_labels_needs_refresh(self):
+        series_url = "https://jnovels.com/duplicate-labels/"
+        server.upsert_books([server.Book("Duplicate Labels", series_url, None, None)])
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/official",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/official",
+                        0,
+                    ),
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/fan",
+                        1,
+                    ),
+                ],
+            ),
+        )
+
+        self.assertEqual(server.get_stale_series_urls(10), [series_url])
+        self.assertEqual(server.count_stale_series(), 1)
 
 
 class SyncTests(unittest.TestCase):

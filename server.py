@@ -79,9 +79,7 @@ class PostDetailsParser(HTMLParser):
         self._content_depth = 0
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
-        self._list_item_depth = 0
-        self._list_item_parts: list[str] = []
-        self._list_item_download_url: str | None = None
+        self._list_items: list[dict[str, Any]] = []
         self._release_group: str | None = None
 
     @staticmethod
@@ -101,66 +99,66 @@ class PostDetailsParser(HTMLParser):
             self._anchor_href = attrs.get("href")
             self._anchor_parts = []
         elif tag == "li" and self._content_depth:
-            self._list_item_depth += 1
-            if self._list_item_depth == 1:
-                self._list_item_parts = []
-                self._list_item_download_url = None
+            self._list_items.append({"parts": [], "download_url": None})
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "a" and self._content_depth and self._anchor_href:
             self._finish_anchor()
             self._anchor_href = None
             self._anchor_parts = []
-        elif tag == "li" and self._content_depth and self._list_item_depth:
-            if self._list_item_depth == 1:
-                self._finish_list_item()
-            self._list_item_depth -= 1
+        elif tag == "li" and self._content_depth and self._list_items:
+            self._finish_list_item(self._list_items.pop())
         elif tag == "div" and self._content_depth:
             self._content_depth -= 1
 
     def handle_data(self, data: str) -> None:
         normalized = " ".join(data.split()).casefold()
-        if self._content_depth and not self._list_item_depth:
-            if normalized == "official translation":
+        if self._content_depth and not self._list_items:
+            if re.search(r"\bofficial (?:translation|translated version|version)\b", normalized):
                 self._release_group = "Official translation"
-            elif normalized == "fan translation":
+            elif re.search(r"\bfan (?:translation|translated version|version)\b", normalized):
                 self._release_group = "Fan translation"
         if self._anchor_href:
             self._anchor_parts.append(data)
-        if self._list_item_depth:
-            self._list_item_parts.append(data)
+        if self._list_items:
+            self._list_items[-1]["parts"].append(data)
 
     def _finish_anchor(self) -> None:
         href = urllib.parse.urljoin(self.post_url, self._anchor_href or "")
         text = " ".join("".join(self._anchor_parts).split())
         normalized = text.casefold()
 
-        if normalized == "refer to original post":
+        if re.fullmatch(r"refer to (?:the )?(?:original|main) post", normalized):
             self.original_post_url = href
             return
 
         if not is_external_http_url(href):
             return
-        if self._list_item_depth and "download" in normalized:
-            self._list_item_download_url = href
+        if self._list_items and "download" in normalized:
+            self._list_items[-1]["download_url"] = href
         if not self.download_url and (
             "download" in normalized or is_volume_label(normalized)
         ):
             self.download_url = href
 
-    def _finish_list_item(self) -> None:
-        if not self._list_item_download_url:
+    def _finish_list_item(self, item: dict[str, Any]) -> None:
+        download_url = item["download_url"]
+        if not download_url:
             return
-        text = " ".join("".join(self._list_item_parts).split())
-        match = re.search(r"\bVOLUME\s+([0-9]+(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
+        text = " ".join("".join(item["parts"]).split())
+        match = re.search(
+            r"\bVOLUME\s+([0-9]+(?:\.[0-9]+)?)(\+*)",
+            text,
+            re.IGNORECASE,
+        )
         if not match:
             return
         number = normalize_volume_number(match.group(1))
-        label = f"Volume {number}"
+        label = f"Volume {number}{match.group(2)}"
         self.volumes.append(
             SeriesVolume(
                 label,
-                self._list_item_download_url,
+                download_url,
                 len(self.volumes),
                 self._release_group,
             )
@@ -707,6 +705,14 @@ def stale_series_where_clause() -> str:
                 FROM books AS b
                 WHERE b.original_post_url = ss.series_url
                   AND b.cached_at > ss.checked_at
+            )
+            OR EXISTS (
+                SELECT 1
+                FROM series_volumes AS sv
+                WHERE sv.series_url = ss.series_url
+                GROUP BY sv.series_url
+                HAVING COUNT(*) > COUNT(DISTINCT sv.label)
+                   AND COUNT(sv.release_group) = 0
             )
         )
     """
