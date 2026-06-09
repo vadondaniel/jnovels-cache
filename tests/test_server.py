@@ -189,6 +189,33 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(books[0]["title"], "Book 20")
         self.assertEqual(books[-1]["title"], "Book 29")
 
+    def test_filters_series_volumes_and_pending_entries(self):
+        series = server.Book("Series", "https://example/series", None, None)
+        volume = server.Book("Volume 2", "https://example/volume-2", None, None)
+        pending = server.Book("Pending", "https://example/pending", None, None)
+        server.upsert_books([series, volume, pending])
+        server.update_book_details(
+            series.url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+            ),
+        )
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series.url, "https://files.example/v2"),
+        )
+
+        self.assertEqual(server.count_books("", "series"), 1)
+        self.assertEqual(server.count_books("", "volumes"), 1)
+        self.assertEqual(server.count_books("", "pending"), 1)
+        self.assertEqual(
+            [book["url"] for book in server.list_books("", "title_asc", entry_filter="pending")],
+            [pending.url],
+        )
+
     def test_updates_second_pass_details(self):
         book = server.Book("Volume 16", "https://example/book", None, "2026-01-01")
         server.upsert_books([book])

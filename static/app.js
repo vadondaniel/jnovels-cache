@@ -8,7 +8,12 @@ const state = {
   total: 0,
   loadSequence: 0,
   health: {},
+  filter: "all",
 };
+
+const defaultSort = "published_desc";
+const validSorts = new Set(["published_desc", "published_asc", "title_asc", "title_desc", "cached_desc"]);
+const validFilters = new Set(["all", "series", "volumes", "pending"]);
 
 const elements = {
   search: document.querySelector("#search"),
@@ -16,6 +21,7 @@ const elements = {
   grid: document.querySelector("#book-grid"),
   count: document.querySelector("#result-count"),
   lastSync: document.querySelector("#last-sync"),
+  filterButtons: [...document.querySelectorAll("[data-filter]")],
   cacheHealth: document.querySelector("#cache-health"),
   syncStatus: document.querySelector("#sync-status"),
   syncToggle: document.querySelector("#sync-toggle"),
@@ -55,6 +61,39 @@ const elements = {
   catalogSeriesLink: document.querySelector("#catalog-series-link"),
   catalogClose: document.querySelector("#catalog-close"),
 };
+
+function updateFilterButtons() {
+  elements.filterButtons.forEach((button) => {
+    button.setAttribute("aria-pressed", String(button.dataset.filter === state.filter));
+  });
+}
+
+function applyViewFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  const page = Number.parseInt(params.get("page") || "1", 10);
+  const sort = params.get("sort") || defaultSort;
+  const entryFilter = params.get("filter") || "all";
+
+  elements.search.value = params.get("q") || "";
+  elements.sort.value = validSorts.has(sort) ? sort : defaultSort;
+  state.filter = validFilters.has(entryFilter) ? entryFilter : "all";
+  state.page = Number.isNaN(page) ? 1 : Math.max(page, 1);
+  updateFilterButtons();
+}
+
+function syncViewUrl(mode = "replace") {
+  const url = new URL(window.location.href);
+  ["q", "sort", "filter", "page"].forEach((key) => url.searchParams.delete(key));
+
+  const query = elements.search.value.trim();
+  if (query) url.searchParams.set("q", query);
+  if (elements.sort.value !== defaultSort) url.searchParams.set("sort", elements.sort.value);
+  if (state.filter !== "all") url.searchParams.set("filter", state.filter);
+  if (state.page > 1) url.searchParams.set("page", String(state.page));
+
+  const method = mode === "push" ? "pushState" : "replaceState";
+  window.history[method]({}, "", url);
+}
 
 function formatDate(value, options = { year: "numeric", month: "short", day: "numeric" }) {
   if (!value) return "Date unavailable";
@@ -155,12 +194,13 @@ function renderBooks(books, total) {
 
   elements.grid.append(fragment);
   const hasQuery = Boolean(elements.search.value.trim());
+  const hasFilter = state.filter !== "all";
   elements.empty.hidden = total !== 0;
-  elements.emptyTitle.textContent = hasQuery ? "No matching entries" : "The cache is empty";
-  elements.emptyText.textContent = hasQuery
-    ? "Try a different title or clear the search."
+  elements.emptyTitle.textContent = hasQuery || hasFilter ? "No matching entries" : "The cache is empty";
+  elements.emptyText.textContent = hasQuery || hasFilter
+    ? "Try a different search or filter."
     : "Sync the newest JNovels EPUB entries to get started.";
-  elements.emptySync.hidden = hasQuery;
+  elements.emptySync.hidden = hasQuery || hasFilter;
 }
 
 function renderPagination(payload) {
@@ -251,11 +291,12 @@ elements.catalogDialog.addEventListener("click", (event) => {
   if (event.target === elements.catalogDialog) elements.catalogDialog.close();
 });
 
-async function loadBooks({ scroll = false } = {}) {
+async function loadBooks({ scroll = false, historyMode = null } = {}) {
   const sequence = ++state.loadSequence;
   const params = new URLSearchParams({
     q: elements.search.value.trim(),
     sort: elements.sort.value,
+    filter: state.filter,
     page: String(state.page),
     page_size: String(state.pageSize),
   });
@@ -264,6 +305,7 @@ async function loadBooks({ scroll = false } = {}) {
   state.books = payload.books;
   renderBooks(state.books, payload.count);
   renderPagination(payload);
+  if (historyMode) syncViewUrl(historyMode);
   if (scroll) elements.grid.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -482,22 +524,36 @@ elements.syncForm.addEventListener("submit", async (event) => {
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.page = 1;
-  state.searchTimer = setTimeout(() => loadBooks().catch((error) => showToast(error.message, true)), 160);
+  state.searchTimer = setTimeout(
+    () => loadBooks({ historyMode: "replace" }).catch((error) => showToast(error.message, true)),
+    160,
+  );
 });
 
 elements.sort.addEventListener("change", () => {
   state.page = 1;
-  loadBooks().catch((error) => showToast(error.message, true));
+  loadBooks({ historyMode: "push" }).catch((error) => showToast(error.message, true));
 });
 
-function goToPage(page) {
+elements.filterButtons.forEach((button) => {
+  button.addEventListener("click", () => {
+    const nextFilter = button.dataset.filter;
+    if (!validFilters.has(nextFilter) || nextFilter === state.filter) return;
+    state.filter = nextFilter;
+    state.page = 1;
+    updateFilterButtons();
+    loadBooks({ historyMode: "push" }).catch((error) => showToast(error.message, true));
+  });
+});
+
+function goToPage(page, historyMode = "push") {
   const nextPage = Math.min(Math.max(page, 1), state.pages);
   if (nextPage === state.page) {
     elements.pageNumber.value = String(state.page);
     return;
   }
   state.page = nextPage;
-  loadBooks({ scroll: true }).catch((error) => showToast(error.message, true));
+  loadBooks({ scroll: true, historyMode }).catch((error) => showToast(error.message, true));
 }
 
 elements.pageFirst.addEventListener("click", () => goToPage(1));
@@ -523,6 +579,12 @@ elements.pageNumber.addEventListener("keydown", (event) => {
   }
 });
 
+window.addEventListener("popstate", () => {
+  clearTimeout(state.searchTimer);
+  applyViewFromUrl();
+  loadBooks().catch((error) => showToast(error.message, true));
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "/" && !["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) {
     event.preventDefault();
@@ -530,5 +592,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+applyViewFromUrl();
 updateSyncMode();
-Promise.all([loadBooks(), loadStatus()]).catch((error) => showToast(error.message, true));
+Promise.all([loadBooks({ historyMode: "replace" }), loadStatus()])
+  .catch((error) => showToast(error.message, true));

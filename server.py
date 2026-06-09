@@ -922,15 +922,44 @@ def run_sync(
         sync_lock.release()
 
 
-def book_filter(query: str) -> tuple[str, tuple[str, ...]]:
-    if not query:
+def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, ...]]:
+    conditions: list[str] = []
+    params: list[str] = []
+    if query:
+        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        conditions.append("title LIKE ? ESCAPE '\\'")
+        params.append(f"%{escaped}%")
+
+    if entry_filter == "series":
+        conditions.append("entry_type = 'series'")
+    elif entry_filter == "volumes":
+        conditions.append("entry_type = 'volume'")
+    elif entry_filter == "pending":
+        conditions.append(
+            """
+            (
+                detail_cached_at IS NULL
+                OR entry_type IS NULL
+                OR (entry_type = 'volume' AND download_url IS NULL)
+                OR (
+                    entry_type = 'series'
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM series_volumes AS sv
+                        WHERE sv.series_url = books.url
+                    )
+                )
+            )
+            """
+        )
+
+    if not conditions:
         return "", ()
-    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-    return " WHERE title LIKE ? ESCAPE '\\'", (f"%{escaped}%",)
+    return f" WHERE {' AND '.join(conditions)}", tuple(params)
 
 
-def count_books(query: str) -> int:
-    where_clause, params = book_filter(query)
+def count_books(query: str, entry_filter: str = "all") -> int:
+    where_clause, params = book_filter(query, entry_filter)
     with connect_db() as connection:
         return connection.execute(
             f"SELECT COUNT(*) FROM books{where_clause}",
@@ -943,6 +972,7 @@ def list_books(
     sort: str,
     limit: int | None = None,
     offset: int = 0,
+    entry_filter: str = "all",
 ) -> list[dict[str, Any]]:
     order_by = {
         "published_desc": "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC",
@@ -952,7 +982,7 @@ def list_books(
         "cached_desc": "cached_at DESC, title COLLATE NOCASE, id DESC",
     }.get(sort, "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC")
 
-    where_clause, filter_params = book_filter(query)
+    where_clause, filter_params = book_filter(query, entry_filter)
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
                entry_type, original_post_url, download_url, detail_cached_at
@@ -1056,6 +1086,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query)
             query = params.get("q", [""])[0].strip()
             sort = params.get("sort", ["published_desc"])[0]
+            entry_filter = params.get("filter", ["all"])[0].strip().casefold()
+            if entry_filter not in {"all", "series", "volumes", "pending"}:
+                entry_filter = "all"
             page = parse_positive_int(params.get("page", ["1"])[0], 1)
             page_size = min(
                 parse_positive_int(
@@ -1064,10 +1097,16 @@ class AppHandler(SimpleHTTPRequestHandler):
                 ),
                 MAX_PAGE_SIZE,
             )
-            count = count_books(query)
+            count = count_books(query, entry_filter)
             pages = max(1, (count + page_size - 1) // page_size)
             page = min(page, pages)
-            books = list_books(query, sort, page_size, (page - 1) * page_size)
+            books = list_books(
+                query,
+                sort,
+                page_size,
+                (page - 1) * page_size,
+                entry_filter,
+            )
             self.send_json(
                 {
                     "books": books,
@@ -1075,6 +1114,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "page": page,
                     "page_size": page_size,
                     "pages": pages,
+                    "filter": entry_filter,
                 }
             )
             return

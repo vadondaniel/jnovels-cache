@@ -237,6 +237,33 @@ kbd {
   gap: 12px;
 }
 
+.entry-filters {
+  display: inline-flex;
+  padding: 3px;
+  background: #ebe6da;
+  border-radius: 6px;
+}
+
+.entry-filters button {
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: .72rem;
+  font-weight: 700;
+}
+
+.entry-filters button:hover { color: var(--ink); }
+
+.entry-filters button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 3px rgba(30, 25, 16, .12);
+}
+
 .cache-health {
   padding: 5px 9px;
   color: #765815;
@@ -964,6 +991,8 @@ kbd {
   .repair-dialog__footer .button { width: 100%; }
   .status-row { align-items: flex-start; gap: 8px; padding: 20px 0; flex-direction: column; }
   .status-row__activity { justify-content: flex-start; flex-wrap: wrap; }
+  .entry-filters { width: 100%; }
+  .entry-filters button { flex: 1; padding-inline: 6px; }
   .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; padding-top: 18px; }
   .book-card__body { min-height: 135px; padding: 13px; }
   .book-card h2 { font-size: .91rem; }

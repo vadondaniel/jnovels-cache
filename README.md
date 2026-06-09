@@ -31,7 +31,8 @@ The app opens at <http://127.0.0.1:8765>.
    retry a small number of older incomplete entries automatically.
 4. Search and sort the cached results without waiting for JNovels search pages.
    Results are shown 24 at a time; use the page field to jump directly to any
-   result page.
+   result page. Search, sort, entry filter, and page are preserved in the URL
+   and browser history.
 
 Cards can expose three actions:
 
