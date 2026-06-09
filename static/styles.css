@@ -573,16 +573,34 @@ select, .sync-options input {
 }
 
 .catalog-dialog__list {
+  max-height: 520px;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.catalog-dialog__group + .catalog-dialog__group {
+  border-top: 1px solid var(--line);
+}
+
+.catalog-dialog__group h3 {
+  margin: 0;
+  padding: 14px 16px 11px;
+  color: var(--gold-dark);
+  background: #f7f3e9;
+  font-size: .69rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.catalog-dialog__volume-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
-  max-height: 520px;
   padding: 1px;
-  overflow-y: auto;
   background: var(--line);
 }
 
-.catalog-dialog__list a {
+.catalog-dialog__volume-grid a {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -596,28 +614,28 @@ select, .sync-options input {
   text-decoration: none;
 }
 
-.catalog-dialog__list a > span:first-child {
+.catalog-dialog__volume-grid a > span:first-child {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 4px;
 }
 
-.catalog-dialog__list strong {
+.catalog-dialog__volume-grid strong {
   font-size: .82rem;
 }
 
-.catalog-dialog__list small {
+.catalog-dialog__volume-grid small {
   color: #938d82;
   font-size: .66rem;
   font-weight: 500;
 }
 
-.catalog-dialog__list small.is-known {
+.catalog-dialog__volume-grid small.is-known {
   color: var(--gold-dark);
 }
 
-.catalog-dialog__list a:hover {
+.catalog-dialog__volume-grid a:hover {
   color: var(--gold-dark);
   background: #fffcf3;
 }
@@ -664,7 +682,7 @@ select, .sync-options input {
   .book-card__body { min-height: 135px; padding: 13px; }
   .book-card h2 { font-size: .91rem; }
   .book-card__open { display: none; }
-  .catalog-dialog__list { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .catalog-dialog__volume-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 380px) {

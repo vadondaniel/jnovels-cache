@@ -53,6 +53,7 @@ class SeriesVolume:
     label: str
     download_url: str
     position: int
+    release_group: str | None = None
 
 
 class PostDetailsParser(HTMLParser):
@@ -68,6 +69,7 @@ class PostDetailsParser(HTMLParser):
         self._list_item_depth = 0
         self._list_item_parts: list[str] = []
         self._list_item_download_url: str | None = None
+        self._release_group: str | None = None
 
     @staticmethod
     def _classes(attrs: dict[str, str | None]) -> set[str]:
@@ -104,6 +106,12 @@ class PostDetailsParser(HTMLParser):
             self._content_depth -= 1
 
     def handle_data(self, data: str) -> None:
+        normalized = " ".join(data.split()).casefold()
+        if self._content_depth and not self._list_item_depth:
+            if normalized == "official translation":
+                self._release_group = "Official translation"
+            elif normalized == "fan translation":
+                self._release_group = "Fan translation"
         if self._anchor_href:
             self._anchor_parts.append(data)
         if self._list_item_depth:
@@ -137,7 +145,12 @@ class PostDetailsParser(HTMLParser):
         number = match.group(1)
         label = f"Volume {number}"
         self.volumes.append(
-            SeriesVolume(label, self._list_item_download_url, len(self.volumes))
+            SeriesVolume(
+                label,
+                self._list_item_download_url,
+                len(self.volumes),
+                self._release_group,
+            )
         )
 
     def details(self) -> PostDetails:
@@ -308,6 +321,7 @@ def initialize_db() -> None:
                 download_url TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 cached_at TEXT NOT NULL,
+                release_group TEXT,
                 UNIQUE(series_url, download_url)
             );
 
@@ -327,6 +341,14 @@ def initialize_db() -> None:
         for column, statement in migrations.items():
             if column not in existing_columns:
                 connection.execute(statement)
+        volume_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(series_volumes)").fetchall()
+        }
+        if "release_group" not in volume_columns:
+            connection.execute(
+                "ALTER TABLE series_volumes ADD COLUMN release_group TEXT"
+            )
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -444,8 +466,8 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
         connection.executemany(
             """
             INSERT INTO series_volumes
-                (series_url, label, download_url, position, cached_at)
-            VALUES (?, ?, ?, ?, ?)
+                (series_url, label, download_url, position, cached_at, release_group)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -454,6 +476,7 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
                     volume.download_url,
                     volume.position,
                     now,
+                    volume.release_group,
                 )
                 for volume in volumes
             ],
@@ -623,6 +646,7 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
                    sv.download_url,
                    sv.position,
                    sv.cached_at,
+                   sv.release_group,
                    (
                        SELECT b.published_at
                        FROM books AS b

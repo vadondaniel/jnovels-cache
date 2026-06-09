@@ -38,6 +38,21 @@ VOLUME_POST_HTML = """
 </article>
 """
 
+GROUPED_SERIES_HTML = """
+<article>
+  <div class="post-content clear">
+    <div><strong>OFFICIAL TRANSLATION</strong></div>
+    <ol>
+      <li>Example volume 1 epub <a href="https://files.example/official-1">DOWNLOAD</a></li>
+    </ol>
+    <div><strong>FAN TRANSLATION</strong></div>
+    <ol>
+      <li>Example volume 1 epub <a href="https://files.example/fan-1">DOWNLOAD</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_extracts_search_result_metadata(self):
@@ -80,6 +95,19 @@ class ParserTests(unittest.TestCase):
             "https://jnovels.com/example-light-novel-epub/",
         )
         self.assertEqual(details.download_url, "https://files.example/volume-16")
+
+    def test_preserves_official_and_fan_translation_groups(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(GROUPED_SERIES_HTML)
+        details = parser.details()
+
+        self.assertEqual(
+            [(volume.label, volume.release_group) for volume in details.volumes],
+            [
+                ("Volume 1", "Official translation"),
+                ("Volume 1", "Fan translation"),
+            ],
+        )
 
 
 class DatabaseTests(unittest.TestCase):

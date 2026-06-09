@@ -129,25 +129,44 @@ async function openCatalog(book) {
     elements.catalogCount.textContent =
       `${payload.count} ${payload.count === 1 ? "volume" : "volumes"} cached`;
     const fragment = document.createDocumentFragment();
+    const grouped = new Map();
     payload.volumes.forEach((volume) => {
-      const link = document.createElement("a");
-      const text = document.createElement("span");
-      const label = document.createElement("strong");
-      const date = document.createElement("small");
-      const arrow = document.createElement("span");
-      link.href = volume.download_url;
-      link.target = "_blank";
-      link.rel = "noopener";
-      label.textContent = volume.label;
-      date.textContent = volume.published_at
-        ? `Released ${formatDate(volume.published_at)}`
-        : "Release date not cached";
-      date.classList.toggle("is-known", Boolean(volume.published_at));
-      arrow.textContent = "↗";
-      arrow.setAttribute("aria-hidden", "true");
-      text.append(label, date);
-      link.append(text, arrow);
-      fragment.append(link);
+      const groupName = volume.release_group || "";
+      if (!grouped.has(groupName)) grouped.set(groupName, []);
+      grouped.get(groupName).push(volume);
+    });
+    grouped.forEach((volumes, groupName) => {
+      const group = document.createElement("section");
+      const list = document.createElement("div");
+      group.className = "catalog-dialog__group";
+      list.className = "catalog-dialog__volume-grid";
+      if (groupName) {
+        const heading = document.createElement("h3");
+        heading.textContent = groupName;
+        group.append(heading);
+      }
+      volumes.forEach((volume) => {
+        const link = document.createElement("a");
+        const text = document.createElement("span");
+        const label = document.createElement("strong");
+        const date = document.createElement("small");
+        const arrow = document.createElement("span");
+        link.href = volume.download_url;
+        link.target = "_blank";
+        link.rel = "noopener";
+        label.textContent = volume.label;
+        date.textContent = volume.published_at
+          ? `Released ${formatDate(volume.published_at)}`
+          : "Release date not cached";
+        date.classList.toggle("is-known", Boolean(volume.published_at));
+        arrow.textContent = "↗";
+        arrow.setAttribute("aria-hidden", "true");
+        text.append(label, date);
+        link.append(text, arrow);
+        list.append(link);
+      });
+      group.append(list);
+      fragment.append(group);
     });
     elements.catalogList.append(fragment);
   } catch (error) {
