@@ -18,7 +18,12 @@ The app opens at <http://127.0.0.1:8765>.
 ## Use
 
 1. Select **Sync cache**.
-2. Choose a starting page and number of pages. The default scans pages 1-6.
+2. Choose a sync mode:
+   - **Catch up new entries** starts at page 1 and stops when it reaches
+     already-cached results.
+   - **Extend older cache** estimates the current cached frontier and adds the
+     requested number of older uncached pages.
+   - **Custom page range** scans an explicit starting page and page count.
 3. Select **Start sync**. The app scans search pages, then visits each result
    post to identify its entry type and associated links.
 4. Search and sort the cached results without waiting for JNovels search pages.

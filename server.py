@@ -520,14 +520,22 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
         )
 
 
+def get_cached_urls() -> set[str]:
+    with connect_db() as connection:
+        rows = connection.execute("SELECT url FROM books").fetchall()
+    return {row["url"] for row in rows}
+
+
 sync_lock = threading.Lock()
 sync_state: dict[str, Any] = {
     "running": False,
+    "mode": None,
     "phase": None,
     "page": 0,
     "pages_requested": 0,
     "pages_completed": 0,
     "items_seen": 0,
+    "new_items": 0,
     "details_completed": 0,
     "details_total": 0,
     "detail_errors": 0,
@@ -540,7 +548,122 @@ sync_state: dict[str, Any] = {
 }
 
 
-def run_sync(start_page: int, max_pages: int, delay: float) -> None:
+def collect_sync_books(
+    mode: str,
+    start_page: int,
+    max_pages: int,
+    delay: float,
+    known_urls: set[str],
+) -> list[Book]:
+    collected: list[Book] = []
+    fetched_pages: dict[int, list[Book]] = {}
+
+    def fetch(page: int) -> list[Book]:
+        if page not in fetched_pages:
+            sync_state["page"] = page
+            fetched_pages[page] = fetch_page(page)
+            sync_state["pages_completed"] += 1
+            sync_state["items_seen"] += len(fetched_pages[page])
+        return fetched_pages[page]
+
+    def add_new(books: list[Book]) -> int:
+        new_books = [book for book in books if book.url not in known_urls]
+        collected.extend(new_books)
+        known_urls.update(book.url for book in new_books)
+        sync_state["new_items"] += len(new_books)
+        return len(new_books)
+
+    if mode == "catchup":
+        for page in range(1, max_pages + 1):
+            books = fetch(page)
+            if not books:
+                break
+            page_had_known = any(book.url in known_urls for book in books)
+            add_new(books)
+            if page_had_known:
+                break
+            if page < max_pages:
+                time.sleep(delay)
+        return collected
+
+    if mode == "extend":
+        if not known_urls:
+            for page in range(1, max_pages + 1):
+                books = fetch(page)
+                if not books:
+                    break
+                add_new(books)
+                if page < max_pages:
+                    time.sleep(delay)
+            return collected
+
+        first_known_page = 1
+        page_size = 0
+        for page in range(1, min(max_pages, 10) + 1):
+            books = fetch(page)
+            if not books:
+                return collected
+            page_size = max(page_size, len(books))
+            page_had_known = any(book.url in known_urls for book in books)
+            add_new(books)
+            if page_had_known:
+                first_known_page = page
+                break
+            time.sleep(delay)
+
+        if page_size == 0:
+            return collected
+
+        estimated_frontier = max(
+            first_known_page + 1,
+            (len(known_urls) + page_size - 1) // page_size,
+        )
+        candidate_page = max(first_known_page + 1, estimated_frontier - 2)
+        candidate_books = fetch(candidate_page)
+        while (
+            candidate_page > first_known_page + 1
+            and not any(book.url in known_urls for book in candidate_books)
+        ):
+            candidate_page -= 1
+            candidate_books = fetch(candidate_page)
+
+        page = (
+            candidate_page + 1
+            if any(book.url in known_urls for book in candidate_books)
+            else first_known_page + 1
+        )
+        uncached_pages_added = 0
+        while uncached_pages_added < max_pages:
+            books = fetch(page)
+            if not books:
+                break
+            new_count = add_new(books)
+            if new_count:
+                uncached_pages_added += 1
+            page += 1
+            if uncached_pages_added < max_pages:
+                time.sleep(delay)
+        return collected
+
+    for offset in range(max_pages):
+        page = start_page + offset
+        books = fetch(page)
+        if not books:
+            break
+        collected.extend(books)
+        sync_state["new_items"] += sum(book.url not in known_urls for book in books)
+        known_urls.update(book.url for book in books)
+        if offset < max_pages - 1:
+            time.sleep(delay)
+    return collected
+
+
+def run_sync(
+    start_page: int,
+    max_pages: int,
+    delay: float,
+    mode: str = "manual",
+) -> None:
     if not sync_lock.acquire(blocking=False):
         return
 
@@ -548,11 +671,13 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
         sync_state.update(
             {
                 "running": True,
+                "mode": mode,
                 "phase": "search",
                 "page": start_page,
                 "pages_requested": max_pages,
                 "pages_completed": 0,
                 "items_seen": 0,
+                "new_items": 0,
                 "details_completed": 0,
                 "details_total": 0,
                 "detail_errors": 0,
@@ -565,21 +690,10 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
             }
         )
 
-        detail_urls: list[str] = []
-        for offset in range(max_pages):
-            page = start_page + offset
-            sync_state["page"] = page
-            books = fetch_page(page)
-            if not books:
-                break
-            upsert_books(books)
-            detail_urls.extend(book.url for book in books)
-            sync_state["pages_completed"] += 1
-            sync_state["items_seen"] += len(books)
-            if offset < max_pages - 1:
-                time.sleep(delay)
-
-        detail_urls = list(dict.fromkeys(detail_urls))
+        known_urls = get_cached_urls()
+        books = collect_sync_books(mode, start_page, max_pages, delay, known_urls)
+        upsert_books(books)
+        detail_urls = list(dict.fromkeys(book.url for book in books))
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
         discovered_series_urls: set[str] = set()
@@ -768,8 +882,11 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         try:
             payload = self.read_json()
+            mode = str(payload.get("mode", "catchup")).strip().casefold()
+            if mode not in {"catchup", "extend", "manual"}:
+                raise ValueError("Unknown sync mode")
             start_page = min(max(int(payload.get("start_page", 1)), 1), 10000)
-            max_pages = min(max(int(payload.get("max_pages", 6)), 1), 200)
+            max_pages = min(max(int(payload.get("max_pages", 20)), 1), 200)
             delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
         except (ValueError, TypeError, json.JSONDecodeError):
             self.send_json({"error": "Invalid sync options."}, HTTPStatus.BAD_REQUEST)
@@ -777,7 +894,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         thread = threading.Thread(
             target=run_sync,
-            args=(start_page, max_pages, delay),
+            args=(start_page, max_pages, delay, mode),
             name="jnovels-sync",
             daemon=True,
         )

@@ -12,10 +12,17 @@ const elements = {
   lastSync: document.querySelector("#last-sync"),
   syncStatus: document.querySelector("#sync-status"),
   syncToggle: document.querySelector("#sync-toggle"),
+  syncDialog: document.querySelector("#sync-dialog"),
+  syncClose: document.querySelector("#sync-close"),
+  syncCancel: document.querySelector("#sync-cancel"),
   syncForm: document.querySelector("#sync-form"),
+  syncMode: document.querySelector("#sync-mode"),
+  startPageField: document.querySelector("#start-page-field"),
   startPage: document.querySelector("#start-page"),
+  maxPagesLabel: document.querySelector("#max-pages-label"),
   maxPages: document.querySelector("#max-pages"),
   delay: document.querySelector("#delay"),
+  syncHelp: document.querySelector("#sync-help"),
   empty: document.querySelector("#empty-state"),
   emptySync: document.querySelector("#empty-sync"),
   template: document.querySelector("#book-template"),
@@ -218,8 +225,13 @@ function updateStatus(payload) {
       elements.syncStatus.textContent =
         `Indexing post ${Math.min(sync.details_completed + 1, sync.details_total)} of ${sync.details_total}`;
     } else {
+      const prefix = sync.mode === "extend"
+        ? "Finding older uncached entries"
+        : sync.mode === "catchup"
+          ? "Checking newest entries"
+          : "Scanning";
       elements.syncStatus.textContent =
-        `Scanning page ${sync.page} · ${sync.items_seen} results seen`;
+        `${prefix} · page ${sync.page} · ${sync.new_items} new`;
     }
     elements.syncStatus.classList.add("is-running");
   } else {
@@ -231,6 +243,29 @@ function updateStatus(payload) {
         : "";
   }
 }
+
+function updateSyncMode() {
+  const mode = elements.syncMode.value;
+  elements.startPageField.hidden = mode !== "manual";
+  if (mode === "catchup") {
+    elements.maxPagesLabel.textContent = "Safety page limit";
+    elements.maxPages.value = "20";
+    elements.syncHelp.textContent =
+      "Starts from the newest page and stops automatically when cached entries are reached.";
+  } else if (mode === "extend") {
+    elements.maxPagesLabel.textContent = "Older pages to add";
+    elements.maxPages.value = "10";
+    elements.syncHelp.textContent =
+      "Finds the current cache frontier, then continues into older uncached result pages.";
+  } else {
+    elements.maxPagesLabel.textContent = "Pages to scan";
+    elements.maxPages.value = "6";
+    elements.syncHelp.textContent =
+      "Scans an exact page range, including already cached entries.";
+  }
+}
+
+elements.syncMode.addEventListener("change", updateSyncMode);
 
 async function loadStatus() {
   try {
@@ -251,14 +286,15 @@ async function loadStatus() {
 }
 
 function openSyncOptions() {
-  elements.syncForm.hidden = false;
-  elements.syncForm.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  elements.startPage.focus();
+  if (!elements.syncDialog.open) elements.syncDialog.showModal();
+  elements.syncMode.focus();
 }
 
-elements.syncToggle.addEventListener("click", () => {
-  elements.syncForm.hidden = !elements.syncForm.hidden;
-  if (!elements.syncForm.hidden) elements.startPage.focus();
+elements.syncToggle.addEventListener("click", openSyncOptions);
+elements.syncClose.addEventListener("click", () => elements.syncDialog.close());
+elements.syncCancel.addEventListener("click", () => elements.syncDialog.close());
+elements.syncDialog.addEventListener("click", (event) => {
+  if (event.target === elements.syncDialog) elements.syncDialog.close();
 });
 
 elements.emptySync.addEventListener("click", openSyncOptions);
@@ -270,12 +306,13 @@ elements.syncForm.addEventListener("submit", async (event) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        mode: elements.syncMode.value,
         start_page: Number(elements.startPage.value),
         max_pages: Number(elements.maxPages.value),
         delay: Number(elements.delay.value),
       }),
     });
-    elements.syncForm.hidden = true;
+    elements.syncDialog.close();
     showToast("Sync started.");
     await loadStatus();
   } catch (error) {
@@ -299,4 +336,5 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+updateSyncMode();
 Promise.all([loadBooks(), loadStatus()]).catch((error) => showToast(error.message, true));

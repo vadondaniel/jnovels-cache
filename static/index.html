@@ -55,22 +55,6 @@
         </button>
       </div>
 
-      <form id="sync-form" class="sync-options" hidden>
-        <label>
-          <span>Start page</span>
-          <input id="start-page" type="number" min="1" max="10000" value="1" required>
-        </label>
-        <label>
-          <span>Pages to scan</span>
-          <input id="max-pages" type="number" min="1" max="200" value="6" required>
-        </label>
-        <label>
-          <span>Delay (seconds)</span>
-          <input id="delay" type="number" min="0.5" max="10" step="0.5" value="1" required>
-        </label>
-        <button class="button button--dark" type="submit">Start sync</button>
-        <p>Scans result pages first, then visits each post for series and download links. One request at a time.</p>
-      </form>
     </section>
 
     <section class="status-row" aria-live="polite">
@@ -90,6 +74,53 @@
       <button id="empty-sync" class="button button--primary" type="button">Set up first sync</button>
     </section>
   </main>
+
+  <dialog id="sync-dialog" class="sync-dialog">
+    <header class="sync-dialog__header">
+      <div>
+        <p class="eyebrow">Cache maintenance</p>
+        <h2>Sync JNovels</h2>
+        <p>Choose how much of the source index to check.</p>
+      </div>
+      <button id="sync-close" class="sync-dialog__close" type="button" aria-label="Close sync options">×</button>
+    </header>
+
+    <form id="sync-form" class="sync-dialog__form">
+      <label class="sync-field">
+        <span>Sync mode</span>
+        <select id="sync-mode">
+          <option value="catchup">Catch up new releases</option>
+          <option value="extend">Extend older cache</option>
+          <option value="manual">Scan a page range</option>
+        </select>
+      </label>
+
+      <div class="sync-dialog__fields">
+        <label id="start-page-field" class="sync-field" hidden>
+          <span>Start page</span>
+          <input id="start-page" type="number" min="1" max="10000" value="1" required>
+        </label>
+        <label class="sync-field">
+          <span id="max-pages-label">Safety page limit</span>
+          <input id="max-pages" type="number" min="1" max="200" value="20" required>
+        </label>
+        <label class="sync-field">
+          <span>Delay between pages</span>
+          <div class="sync-field__unit">
+            <input id="delay" type="number" min="0.5" max="10" step="0.5" value="1" required>
+            <span>sec</span>
+          </div>
+        </label>
+      </div>
+
+      <p id="sync-help" class="sync-dialog__help">Starts from the newest page and stops automatically when cached entries are reached.</p>
+
+      <footer class="sync-dialog__actions">
+        <button id="sync-cancel" class="button button--quiet" type="button">Cancel</button>
+        <button class="button button--dark" type="submit">Start sync</button>
+      </footer>
+    </form>
+  </dialog>
 
   <template id="book-template">
     <article class="book-card">

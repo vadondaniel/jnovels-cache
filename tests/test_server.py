@@ -286,6 +286,79 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(server.sync_state["series_completed"], 1)
         self.assertEqual(server.sync_state["series_errors"], 0)
 
+    def test_catchup_stops_on_first_page_overlapping_cache(self):
+        known_url = "https://jnovels.com/known/"
+        pages = {
+            1: [
+                server.Book("New 1", "https://jnovels.com/new-1/", None, None),
+                server.Book("New 2", "https://jnovels.com/new-2/", None, None),
+            ],
+            2: [
+                server.Book("New 3", "https://jnovels.com/new-3/", None, None),
+                server.Book("Known", known_url, None, None),
+            ],
+        }
+
+        with (
+            patch.object(server, "fetch_page", side_effect=lambda page: pages[page]) as fetch,
+            patch.object(server.time, "sleep"),
+        ):
+            books = server.collect_sync_books(
+                "catchup",
+                start_page=1,
+                max_pages=20,
+                delay=0.5,
+                known_urls={known_url},
+            )
+
+        self.assertEqual(
+            [book.url for book in books],
+            [
+                "https://jnovels.com/new-1/",
+                "https://jnovels.com/new-2/",
+                "https://jnovels.com/new-3/",
+            ],
+        )
+        self.assertEqual(fetch.call_args_list, [call(1), call(2)])
+
+    def test_extend_jumps_near_cached_frontier(self):
+        known_urls = {
+            f"https://jnovels.com/book-{number}/" for number in range(1, 19)
+        }
+
+        def page(number):
+            start = (number - 1) * 6 + 1
+            return [
+                server.Book(
+                    f"Book {item}",
+                    f"https://jnovels.com/book-{item}/",
+                    None,
+                    None,
+                )
+                for item in range(start, start + 6)
+            ]
+
+        with (
+            patch.object(server, "fetch_page", side_effect=page) as fetch,
+            patch.object(server.time, "sleep"),
+        ):
+            books = server.collect_sync_books(
+                "extend",
+                start_page=1,
+                max_pages=2,
+                delay=0.5,
+                known_urls=set(known_urls),
+            )
+
+        self.assertEqual(
+            [book.url for book in books],
+            [
+                *[f"https://jnovels.com/book-{item}/" for item in range(19, 25)],
+                *[f"https://jnovels.com/book-{item}/" for item in range(25, 31)],
+            ],
+        )
+        self.assertEqual(fetch.call_args_list, [call(1), call(2), call(3), call(4), call(5)])
+
 
 if __name__ == "__main__":
     unittest.main()
