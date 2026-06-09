@@ -65,8 +65,6 @@ function renderBooks(books) {
     const postLink = card.querySelector(".book-card__action--post");
     const catalogButton = card.querySelector(".book-card__action--catalog");
 
-    coverLink.href = book.url;
-    titleLink.href = book.url;
     titleLink.textContent = book.series_title;
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
@@ -91,6 +89,26 @@ function renderBooks(books) {
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
+    }
+
+    if (book.entry_type === "series" && book.volume_count) {
+      coverLink.href = "#";
+      titleLink.href = "#";
+      coverLink.setAttribute("aria-label", `Open cached catalog for ${book.series_title}`);
+      titleLink.title = "Open cached catalog";
+      const openBookCatalog = (event) => {
+        event.preventDefault();
+        openCatalog(book);
+      };
+      coverLink.addEventListener("click", openBookCatalog);
+      titleLink.addEventListener("click", openBookCatalog);
+    } else {
+      const primaryUrl = book.download_url || book.url;
+      coverLink.href = primaryUrl;
+      titleLink.href = primaryUrl;
+      const action = book.download_url ? "Download" : "Open post for";
+      coverLink.setAttribute("aria-label", `${action} ${book.series_title}`);
+      titleLink.title = book.download_url ? "Open download" : "Open post";
     }
 
     if (book.image_url) {
