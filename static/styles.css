@@ -1,14 +1,27 @@
 :root {
+  color-scheme: light;
   --ink: #191713;
   --muted: #706b61;
   --paper: #f3f0e8;
   --surface: #fbfaf6;
   --surface-raised: #ffffff;
+  --control-surface: #f7f4ed;
+  --filter-surface: #ebe6da;
+  --group-surface: #f7f3e9;
+  --hover-surface: #fffcf3;
+  --cover-surface: #ddd8ce;
   --gold: #d7ad4b;
   --gold-dark: #8b681d;
   --gold-light: #f1cd72;
+  --gold-text: #765815;
+  --gold-contrast: #2d220a;
+  --gold-wash: rgba(215, 173, 75, .22);
+  --pending-wash: rgba(25, 23, 19, .07);
   --line: #dcd6c9;
   --line-dark: rgba(255, 255, 255, 0.12);
+  --disabled: #aaa397;
+  --dark-button-bg: #191713;
+  --dark-button-text: #ffffff;
   --radius: 8px;
   --shadow: 0 16px 40px rgba(35, 30, 20, 0.1);
 }
@@ -160,7 +173,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   padding: 0 14px;
   border: 1px solid var(--line);
   border-radius: 5px;
-  background: #f7f4ed;
+  background: var(--control-surface);
 }
 
 .controls label span {
@@ -205,7 +218,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 
 .button--primary:hover { background: #e0b750; }
-.button--dark { color: white; background: var(--ink); }
+.button--dark { color: var(--dark-button-text); background: var(--dark-button-bg); }
 .button:disabled { cursor: wait; opacity: .65; transform: none; }
 
 .status-row {
@@ -230,7 +243,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .entry-filters {
   display: inline-flex;
   padding: 3px;
-  background: #ebe6da;
+  background: var(--filter-surface);
   border-radius: 6px;
 }
 
@@ -256,7 +269,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .cache-health {
   padding: 5px 9px;
-  color: #765815;
+  color: var(--gold-text);
   background: rgba(215, 173, 75, .12);
   border: 1px solid rgba(139, 104, 29, .24);
   border-radius: 999px;
@@ -321,7 +334,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   position: relative;
   aspect-ratio: 2 / 3;
   overflow: hidden;
-  background: #ddd8ce;
+  background: var(--cover-surface);
 }
 
 .book-card__cover img {
@@ -365,7 +378,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .book-card__date {
   margin: 0;
-  color: #9b7623;
+  color: var(--gold-dark);
   font-size: .68rem;
   font-weight: 750;
   letter-spacing: .09em;
@@ -376,7 +389,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   flex: none;
   padding: 3px 6px;
   border-radius: 999px;
-  color: #72561a;
+  color: var(--gold-text);
   background: rgba(215, 173, 75, .17);
   font-size: .59rem;
   font-weight: 750;
@@ -387,7 +400,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .book-card__type.is-pending {
   color: var(--muted);
-  background: rgba(25, 23, 19, .07);
+  background: var(--pending-wash);
 }
 
 .book-card h2 {
@@ -397,6 +410,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   font: 600 1rem/1.38 Georgia, "Times New Roman", serif;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
+  line-clamp: 4;
 }
 
 .book-card h2 a {
@@ -404,7 +418,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   text-decoration: none;
 }
 
-.book-card h2 a:hover { color: #8c6818; }
+.book-card h2 a:hover { color: var(--gold-dark); }
 
 .book-card__actions {
   display: grid;
@@ -438,8 +452,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .book-card__action--download {
   border-color: var(--gold);
-  color: #2d220a;
-  background: rgba(215, 173, 75, .22);
+  color: var(--gold-contrast);
+  background: var(--gold-wash);
 }
 
 .book-card__action[hidden] { display: none; }
@@ -478,7 +492,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   text-align: center;
 }
 
-.empty-state__mark { margin: 0 auto 18px; color: #9b7623; }
+.empty-state__mark { margin: 0 auto 18px; color: var(--gold-dark); }
 .empty-state h2 { margin: 0; font: 600 1.8rem Georgia, serif; }
 .empty-state p { margin: 9px 0 22px; color: var(--muted); }
 .empty-state .button[hidden] { display: none; }
@@ -511,7 +525,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 
 .pagination button:disabled {
-  color: #aaa397;
+  color: var(--disabled);
   cursor: default;
   background: transparent;
 }
@@ -657,7 +671,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   height: 46px;
   padding: 0 12px;
   color: var(--ink);
-  background: white;
+  background: var(--surface-raised);
   border: 1px solid var(--line);
   border-radius: 6px;
   font: inherit;
@@ -891,7 +905,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   margin: 0;
   padding: 14px 16px 11px;
   color: var(--gold-dark);
-  background: #f7f3e9;
+  background: var(--group-surface);
   font-size: .69rem;
   letter-spacing: .09em;
   text-transform: uppercase;
@@ -931,7 +945,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 
 .catalog-dialog__volume-grid small {
-  color: #938d82;
+  color: var(--muted);
   font-size: .66rem;
   font-weight: 500;
 }
@@ -942,7 +956,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .catalog-dialog__volume-grid a:hover {
   color: var(--gold-dark);
-  background: #fffcf3;
+  background: var(--hover-surface);
 }
 
 .catalog-dialog__footer {
@@ -956,6 +970,56 @@ button, a { -webkit-tap-highlight-color: transparent; }
   font-size: .78rem;
   font-weight: 750;
   text-decoration: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --ink: #eee9dc;
+    --muted: #aaa397;
+    --paper: #15140f;
+    --surface: #1d1b16;
+    --surface-raised: #24211a;
+    --control-surface: #211f19;
+    --filter-surface: #29261f;
+    --group-surface: #252219;
+    --hover-surface: #2b271e;
+    --cover-surface: #302e28;
+    --gold-dark: #e4bd62;
+    --gold-text: #ddba66;
+    --gold-contrast: #f3d98f;
+    --gold-wash: rgba(215, 173, 75, .14);
+    --pending-wash: rgba(255, 255, 255, .07);
+    --line: #3b382f;
+    --disabled: #6f6a60;
+    --dark-button-bg: #d7ad4b;
+    --dark-button-text: #17130a;
+    --shadow: 0 16px 40px rgba(0, 0, 0, .28);
+  }
+
+  .control-panel,
+  .book-card {
+    box-shadow: var(--shadow);
+  }
+
+  .book-card:hover {
+    box-shadow: 0 14px 30px rgba(0, 0, 0, .34);
+  }
+
+  .search-box svg {
+    color: #8f897d;
+  }
+
+  .cache-health {
+    background: rgba(215, 173, 75, .1);
+    border-color: rgba(215, 173, 75, .3);
+  }
+
+  .sync-dialog,
+  .repair-dialog,
+  .catalog-dialog {
+    box-shadow: 0 30px 90px rgba(0, 0, 0, .58);
+  }
 }
 
 @media (max-width: 1080px) {
