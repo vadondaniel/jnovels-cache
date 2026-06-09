@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#15130f">
+  <title>JNovels Cache</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero__glow"></div>
+    <nav class="nav wrap">
+      <a class="brand" href="/">
+        <span class="brand__mark">J</span>
+        <span>JNovels Cache</span>
+      </a>
+      <a class="source-link" href="https://jnovels.com/?s=epub" target="_blank" rel="noopener">
+        Open source site <span aria-hidden="true">↗</span>
+      </a>
+    </nav>
+
+    <div class="hero__content wrap">
+      <p class="eyebrow">Your local EPUB index</p>
+      <h1>Find the next volume. <em>Skip the waiting.</em></h1>
+      <p class="lede">A fast, private cache of JNovels search results. Metadata stays on this computer.</p>
+    </div>
+  </header>
+
+  <main class="wrap main">
+    <section class="control-panel" aria-label="Cache controls">
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"/></svg>
+        <input id="search" type="search" placeholder="Search cached titles..." autocomplete="off">
+        <kbd>/</kbd>
+      </div>
+
+      <div class="controls">
+        <label>
+          <span>Sort</span>
+          <select id="sort">
+            <option value="published_desc">Newest published</option>
+            <option value="published_asc">Oldest published</option>
+            <option value="title_asc">Title A–Z</option>
+            <option value="title_desc">Title Z–A</option>
+            <option value="cached_desc">Recently cached</option>
+          </select>
+        </label>
+
+        <button id="sync-toggle" class="button button--primary" type="button">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.5 9A7 7 0 0 0 6.2 6.2L4 8m16 8-2.2 1.8A7 7 0 0 1 5.5 15"/></svg>
+          Sync cache
+        </button>
+      </div>
+
+      <form id="sync-form" class="sync-options" hidden>
+        <label>
+          <span>Start page</span>
+          <input id="start-page" type="number" min="1" max="10000" value="1" required>
+        </label>
+        <label>
+          <span>Pages to scan</span>
+          <input id="max-pages" type="number" min="1" max="200" value="6" required>
+        </label>
+        <label>
+          <span>Delay (seconds)</span>
+          <input id="delay" type="number" min="0.5" max="10" step="0.5" value="1" required>
+        </label>
+        <button class="button button--dark" type="submit">Start sync</button>
+        <p>One request at a time. Existing titles are updated, not duplicated.</p>
+      </form>
+    </section>
+
+    <section class="status-row" aria-live="polite">
+      <div>
+        <strong id="result-count">0 titles</strong>
+        <span id="last-sync">Not synced yet</span>
+      </div>
+      <div id="sync-status" class="sync-status"></div>
+    </section>
+
+    <section id="book-grid" class="book-grid" aria-label="Cached books"></section>
+
+    <section id="empty-state" class="empty-state" hidden>
+      <div class="empty-state__mark">J</div>
+      <h2>No cached titles yet</h2>
+      <p>Run a sync to cache the latest EPUB search pages.</p>
+      <button id="empty-sync" class="button button--primary" type="button">Set up first sync</button>
+    </section>
+  </main>
+
+  <template id="book-template">
+    <article class="book-card">
+      <a class="book-card__cover-link" target="_blank" rel="noopener">
+        <div class="book-card__cover">
+          <img alt="" loading="lazy" referrerpolicy="no-referrer">
+          <div class="book-card__fallback">J</div>
+          <span class="book-card__open">Open <span aria-hidden="true">↗</span></span>
+        </div>
+      </a>
+      <div class="book-card__body">
+        <p class="book-card__date"></p>
+        <h2><a target="_blank" rel="noopener"></a></h2>
+        <p class="book-card__cached"></p>
+      </div>
+    </article>
+  </template>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
