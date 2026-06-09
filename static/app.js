@@ -2,6 +2,11 @@ const state = {
   books: [],
   pollTimer: null,
   searchTimer: null,
+  page: 1,
+  pageSize: 24,
+  pages: 1,
+  total: 0,
+  loadSequence: 0,
 };
 
 const elements = {
@@ -24,7 +29,16 @@ const elements = {
   delay: document.querySelector("#delay"),
   syncHelp: document.querySelector("#sync-help"),
   empty: document.querySelector("#empty-state"),
+  emptyTitle: document.querySelector("#empty-title"),
+  emptyText: document.querySelector("#empty-text"),
   emptySync: document.querySelector("#empty-sync"),
+  pagination: document.querySelector("#pagination"),
+  pageFirst: document.querySelector("#page-first"),
+  pagePrevious: document.querySelector("#page-previous"),
+  pageNumber: document.querySelector("#page-number"),
+  pageTotal: document.querySelector("#page-total"),
+  pageNext: document.querySelector("#page-next"),
+  pageLast: document.querySelector("#page-last"),
   template: document.querySelector("#book-template"),
   toast: document.querySelector("#toast"),
   catalogDialog: document.querySelector("#catalog-dialog"),
@@ -56,7 +70,7 @@ async function request(url, options) {
   return payload;
 }
 
-function renderBooks(books) {
+function renderBooks(books, total) {
   elements.grid.replaceChildren();
   const fragment = document.createDocumentFragment();
 
@@ -133,8 +147,38 @@ function renderBooks(books) {
   });
 
   elements.grid.append(fragment);
-  elements.count.textContent = `${books.length} ${books.length === 1 ? "entry" : "entries"}`;
-  elements.empty.hidden = books.length !== 0 || Boolean(elements.search.value.trim());
+  const hasQuery = Boolean(elements.search.value.trim());
+  elements.empty.hidden = total !== 0;
+  elements.emptyTitle.textContent = hasQuery ? "No matching entries" : "The cache is empty";
+  elements.emptyText.textContent = hasQuery
+    ? "Try a different title or clear the search."
+    : "Sync the newest JNovels EPUB entries to get started.";
+  elements.emptySync.hidden = hasQuery;
+}
+
+function renderPagination(payload) {
+  state.page = payload.page;
+  state.pageSize = payload.page_size;
+  state.pages = payload.pages;
+  state.total = payload.count;
+
+  if (payload.count) {
+    const first = (payload.page - 1) * payload.page_size + 1;
+    const last = first + payload.books.length - 1;
+    elements.count.textContent =
+      `${first}–${last} of ${payload.count} ${payload.count === 1 ? "entry" : "entries"}`;
+  } else {
+    elements.count.textContent = "0 entries";
+  }
+
+  elements.pagination.hidden = payload.pages <= 1;
+  elements.pageNumber.value = String(payload.page);
+  elements.pageNumber.max = String(payload.pages);
+  elements.pageTotal.textContent = `of ${payload.pages}`;
+  elements.pageFirst.disabled = payload.page === 1;
+  elements.pagePrevious.disabled = payload.page === 1;
+  elements.pageNext.disabled = payload.page === payload.pages;
+  elements.pageLast.disabled = payload.page === payload.pages;
 }
 
 async function openCatalog(book) {
@@ -200,14 +244,20 @@ elements.catalogDialog.addEventListener("click", (event) => {
   if (event.target === elements.catalogDialog) elements.catalogDialog.close();
 });
 
-async function loadBooks() {
+async function loadBooks({ scroll = false } = {}) {
+  const sequence = ++state.loadSequence;
   const params = new URLSearchParams({
     q: elements.search.value.trim(),
     sort: elements.sort.value,
+    page: String(state.page),
+    page_size: String(state.pageSize),
   });
   const payload = await request(`/api/books?${params}`);
+  if (sequence !== state.loadSequence) return;
   state.books = payload.books;
-  renderBooks(state.books);
+  renderBooks(state.books, payload.count);
+  renderPagination(payload);
+  if (scroll) elements.grid.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 function updateStatus(payload) {
@@ -322,11 +372,46 @@ elements.syncForm.addEventListener("submit", async (event) => {
 
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
+  state.page = 1;
   state.searchTimer = setTimeout(() => loadBooks().catch((error) => showToast(error.message, true)), 160);
 });
 
 elements.sort.addEventListener("change", () => {
+  state.page = 1;
   loadBooks().catch((error) => showToast(error.message, true));
+});
+
+function goToPage(page) {
+  const nextPage = Math.min(Math.max(page, 1), state.pages);
+  if (nextPage === state.page) {
+    elements.pageNumber.value = String(state.page);
+    return;
+  }
+  state.page = nextPage;
+  loadBooks({ scroll: true }).catch((error) => showToast(error.message, true));
+}
+
+elements.pageFirst.addEventListener("click", () => goToPage(1));
+elements.pagePrevious.addEventListener("click", () => goToPage(state.page - 1));
+elements.pageNext.addEventListener("click", () => goToPage(state.page + 1));
+elements.pageLast.addEventListener("click", () => goToPage(state.pages));
+
+function jumpToEnteredPage() {
+  const page = Number.parseInt(elements.pageNumber.value, 10);
+  if (Number.isNaN(page)) {
+    elements.pageNumber.value = String(state.page);
+    return;
+  }
+  goToPage(page);
+}
+
+elements.pageNumber.addEventListener("change", jumpToEnteredPage);
+elements.pageNumber.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    jumpToEnteredPage();
+    elements.pageNumber.blur();
+  }
 });
 
 document.addEventListener("keydown", (event) => {

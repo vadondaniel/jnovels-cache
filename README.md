@@ -27,6 +27,8 @@ The app opens at <http://127.0.0.1:8765>.
 3. Select **Start sync**. The app scans search pages, then visits each result
    post to identify its entry type and associated links.
 4. Search and sort the cached results without waiting for JNovels search pages.
+   Results are shown 24 at a time; use the page field to jump directly to any
+   result page.
 
 Cards can expose three actions:
 

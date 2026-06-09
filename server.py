@@ -26,6 +26,15 @@ STATIC_DIR = ROOT / "static"
 DB_PATH = ROOT / "jnovels_cache.db"
 BASE_URL = "https://jnovels.com"
 USER_AGENT = "JNovelsCache/1.0 (+local personal metadata cache)"
+DEFAULT_PAGE_SIZE = 24
+MAX_PAGE_SIZE = 100
+
+
+def parse_positive_int(value: str, default: int) -> int:
+    try:
+        return max(int(value), 1)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -740,44 +749,76 @@ def run_sync(
         sync_lock.release()
 
 
-def list_books(query: str, sort: str) -> list[dict[str, Any]]:
-    order_by = {
-        "published_desc": "published_at IS NULL, published_at DESC, title COLLATE NOCASE",
-        "published_asc": "published_at IS NULL, published_at ASC, title COLLATE NOCASE",
-        "title_asc": "title COLLATE NOCASE ASC",
-        "title_desc": "title COLLATE NOCASE DESC",
-        "cached_desc": "cached_at DESC, title COLLATE NOCASE",
-    }.get(sort, "published_at IS NULL, published_at DESC, title COLLATE NOCASE")
+def book_filter(query: str) -> tuple[str, tuple[str, ...]]:
+    if not query:
+        return "", ()
+    escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return " WHERE title LIKE ? ESCAPE '\\'", (f"%{escaped}%",)
 
+
+def count_books(query: str) -> int:
+    where_clause, params = book_filter(query)
+    with connect_db() as connection:
+        return connection.execute(
+            f"SELECT COUNT(*) FROM books{where_clause}",
+            params,
+        ).fetchone()[0]
+
+
+def list_books(
+    query: str,
+    sort: str,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    order_by = {
+        "published_desc": "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC",
+        "published_asc": "published_at IS NULL, published_at ASC, title COLLATE NOCASE, id ASC",
+        "title_asc": "title COLLATE NOCASE ASC, id ASC",
+        "title_desc": "title COLLATE NOCASE DESC, id DESC",
+        "cached_desc": "cached_at DESC, title COLLATE NOCASE, id DESC",
+    }.get(sort, "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC")
+
+    where_clause, filter_params = book_filter(query)
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
                entry_type, original_post_url, download_url, detail_cached_at
         FROM books
-    """
-    params: tuple[str, ...] = ()
-    if query:
-        sql += " WHERE title LIKE ? ESCAPE '\\'"
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        params = (f"%{escaped}%",)
+    """ + where_clause
+    params: tuple[Any, ...] = filter_params
     sql += f" ORDER BY {order_by}"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params += (limit, offset)
 
     with connect_db() as connection:
         rows = connection.execute(sql, params).fetchall()
-        volume_rows = connection.execute(
-            """
-            SELECT series_url, label, download_url, position, cached_at
-            FROM series_volumes
-            ORDER BY series_url, position
-            """
-        ).fetchall()
-
-    volumes_by_series: dict[str, list[dict[str, Any]]] = {}
-    for row in volume_rows:
-        volume = dict(row)
-        series_url = volume.pop("series_url")
-        volumes_by_series.setdefault(series_url, []).append(volume)
 
     books = [dict(row) for row in rows]
+    series_urls: set[str] = set()
+    for book in books:
+        series_url = (
+            book["original_post_url"]
+            if book["entry_type"] == "volume"
+            else book["url"] if book["entry_type"] == "series" else None
+        )
+        if series_url:
+            series_urls.add(series_url)
+    volume_counts: dict[str, int] = {}
+    if series_urls:
+        placeholders = ", ".join("?" for _ in series_urls)
+        with connect_db() as connection:
+            volume_rows = connection.execute(
+                f"""
+                SELECT series_url, COUNT(*) AS volume_count
+                FROM series_volumes
+                WHERE series_url IN ({placeholders})
+                GROUP BY series_url
+                """,
+                tuple(series_urls),
+            ).fetchall()
+        volume_counts = {row["series_url"]: row["volume_count"] for row in volume_rows}
+
     for book in books:
         series_title, volume_label = parse_book_identity(book["title"], book["url"])
         series_url = (
@@ -788,7 +829,7 @@ def list_books(query: str, sort: str) -> list[dict[str, Any]]:
         book["series_title"] = series_title
         book["volume_label"] = volume_label
         book["series_url"] = series_url
-        book["volume_count"] = len(volumes_by_series.get(series_url or "", []))
+        book["volume_count"] = volume_counts.get(series_url or "", 0)
     return books
 
 
@@ -842,8 +883,27 @@ class AppHandler(SimpleHTTPRequestHandler):
             params = urllib.parse.parse_qs(parsed.query)
             query = params.get("q", [""])[0].strip()
             sort = params.get("sort", ["published_desc"])[0]
-            books = list_books(query, sort)
-            self.send_json({"books": books, "count": len(books)})
+            page = parse_positive_int(params.get("page", ["1"])[0], 1)
+            page_size = min(
+                parse_positive_int(
+                    params.get("page_size", [str(DEFAULT_PAGE_SIZE)])[0],
+                    DEFAULT_PAGE_SIZE,
+                ),
+                MAX_PAGE_SIZE,
+            )
+            count = count_books(query)
+            pages = max(1, (count + page_size - 1) // page_size)
+            page = min(page, pages)
+            books = list_books(query, sort, page_size, (page - 1) * page_size)
+            self.send_json(
+                {
+                    "books": books,
+                    "count": count,
+                    "page": page,
+                    "page_size": page_size,
+                    "pages": pages,
+                }
+            )
             return
         if parsed.path == "/api/status":
             with connect_db() as connection:

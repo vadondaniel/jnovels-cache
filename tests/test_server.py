@@ -165,7 +165,29 @@ class DatabaseTests(unittest.TestCase):
             ]
         )
         books = server.list_books("100%", "title_asc")
+        count = server.count_books("100%")
         self.assertEqual([book["title"] for book in books], ["100% Example"])
+        self.assertEqual(count, 1)
+
+    def test_counts_and_pages_books_in_database(self):
+        server.upsert_books(
+            [
+                server.Book(
+                    f"Book {number:02d}",
+                    f"https://example/book-{number}",
+                    None,
+                    None,
+                )
+                for number in range(35)
+            ]
+        )
+
+        books = server.list_books("", "title_asc", limit=10, offset=20)
+
+        self.assertEqual(server.count_books(""), 35)
+        self.assertEqual(len(books), 10)
+        self.assertEqual(books[0]["title"], "Book 20")
+        self.assertEqual(books[-1]["title"], "Book 29")
 
     def test_updates_second_pass_details(self):
         book = server.Book("Volume 16", "https://example/book", None, "2026-01-01")

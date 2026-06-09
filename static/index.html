@@ -62,10 +62,22 @@
 
     <section id="empty-state" class="empty-state" hidden>
       <div class="empty-state__mark">J</div>
-      <h2>The cache is empty</h2>
-      <p>Sync the newest JNovels EPUB entries to get started.</p>
+      <h2 id="empty-title">The cache is empty</h2>
+      <p id="empty-text">Sync the newest JNovels EPUB entries to get started.</p>
       <button id="empty-sync" class="button button--primary" type="button">Sync entries</button>
     </section>
+
+    <nav id="pagination" class="pagination" aria-label="Entry pages" hidden>
+      <button id="page-first" type="button">First</button>
+      <button id="page-previous" type="button">Previous</button>
+      <label class="pagination__jump" for="page-number">
+        <span>Page</span>
+        <input id="page-number" type="number" min="1" value="1" inputmode="numeric">
+        <span id="page-total">of 1</span>
+      </label>
+      <button id="page-next" type="button">Next</button>
+      <button id="page-last" type="button">Last</button>
+    </nav>
   </main>
 
   <dialog id="sync-dialog" class="sync-dialog">
