@@ -33,6 +33,75 @@ class Book:
     url: str
     image_url: str | None
     published_at: str | None
+    entry_type: str | None = None
+    original_post_url: str | None = None
+    download_url: str | None = None
+    detail_cached_at: str | None = None
+
+
+@dataclass
+class PostDetails:
+    entry_type: str
+    original_post_url: str | None
+    download_url: str | None
+
+
+class PostDetailsParser(HTMLParser):
+    def __init__(self, post_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.post_url = post_url
+        self.original_post_url: str | None = None
+        self.download_url: str | None = None
+        self._content_depth = 0
+        self._anchor_href: str | None = None
+        self._anchor_parts: list[str] = []
+
+    @staticmethod
+    def _classes(attrs: dict[str, str | None]) -> set[str]:
+        return set((attrs.get("class") or "").split())
+
+    def handle_starttag(self, tag: str, attrs_list: list[tuple[str, str | None]]) -> None:
+        attrs = dict(attrs_list)
+        if tag == "div":
+            if self._content_depth:
+                self._content_depth += 1
+            elif "post-content" in self._classes(attrs):
+                self._content_depth = 1
+            return
+
+        if tag == "a" and self._content_depth:
+            self._anchor_href = attrs.get("href")
+            self._anchor_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._content_depth and self._anchor_href:
+            self._finish_anchor()
+            self._anchor_href = None
+            self._anchor_parts = []
+        elif tag == "div" and self._content_depth:
+            self._content_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor_href:
+            self._anchor_parts.append(data)
+
+    def _finish_anchor(self) -> None:
+        href = urllib.parse.urljoin(self.post_url, self._anchor_href or "")
+        text = " ".join("".join(self._anchor_parts).split())
+        normalized = text.casefold()
+
+        if normalized == "refer to original post":
+            self.original_post_url = href
+            return
+
+        if self.download_url or not is_external_http_url(href):
+            return
+        if "download" in normalized or is_volume_label(normalized):
+            self.download_url = href
+
+    def details(self) -> PostDetails:
+        entry_type = "volume" if self.original_post_url else "series"
+        return PostDetails(entry_type, self.original_post_url, self.download_url)
 
 
 class SearchResultsParser(HTMLParser):
@@ -133,6 +202,19 @@ def normalize_date(value: str) -> str | None:
     return value
 
 
+def is_external_http_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value)
+    return parsed.scheme in {"http", "https"} and parsed.netloc.casefold() not in {
+        "jnovels.com",
+        "www.jnovels.com",
+    }
+
+
+def is_volume_label(value: str) -> bool:
+    parts = value.strip().split()
+    return len(parts) >= 2 and parts[0] == "volume" and parts[1].isdigit()
+
+
 @contextmanager
 def connect_db() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH, timeout=30)
@@ -158,7 +240,11 @@ def initialize_db() -> None:
                 image_url TEXT,
                 published_at TEXT,
                 cached_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
+                last_seen_at TEXT NOT NULL,
+                entry_type TEXT,
+                original_post_url TEXT,
+                download_url TEXT,
+                detail_cached_at TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
@@ -170,6 +256,18 @@ def initialize_db() -> None:
             );
             """
         )
+        existing_columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(books)").fetchall()
+        }
+        migrations = {
+            "entry_type": "ALTER TABLE books ADD COLUMN entry_type TEXT",
+            "original_post_url": "ALTER TABLE books ADD COLUMN original_post_url TEXT",
+            "download_url": "ALTER TABLE books ADD COLUMN download_url TEXT",
+            "detail_cached_at": "ALTER TABLE books ADD COLUMN detail_cached_at TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in existing_columns:
+                connection.execute(statement)
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -235,13 +333,57 @@ def fetch_page(page: int, timeout: int = 30) -> list[Book]:
     return parser.books
 
 
+def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        body = response.read().decode(charset, errors="replace")
+
+    parser = PostDetailsParser(url)
+    parser.feed(body)
+    return parser.details()
+
+
+def update_book_details(url: str, details: PostDetails) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            UPDATE books
+            SET entry_type = ?,
+                original_post_url = ?,
+                download_url = ?,
+                detail_cached_at = ?
+            WHERE url = ?
+            """,
+            (
+                details.entry_type,
+                details.original_post_url,
+                details.download_url,
+                now,
+                url,
+            ),
+        )
+
+
 sync_lock = threading.Lock()
 sync_state: dict[str, Any] = {
     "running": False,
+    "phase": None,
     "page": 0,
     "pages_requested": 0,
     "pages_completed": 0,
     "items_seen": 0,
+    "details_completed": 0,
+    "details_total": 0,
+    "detail_errors": 0,
     "error": None,
     "started_at": None,
     "finished_at": None,
@@ -256,16 +398,21 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
         sync_state.update(
             {
                 "running": True,
+                "phase": "search",
                 "page": start_page,
                 "pages_requested": max_pages,
                 "pages_completed": 0,
                 "items_seen": 0,
+                "details_completed": 0,
+                "details_total": 0,
+                "detail_errors": 0,
                 "error": None,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "finished_at": None,
             }
         )
 
+        detail_urls: list[str] = []
         for offset in range(max_pages):
             page = start_page + offset
             sync_state["page"] = page
@@ -273,18 +420,35 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
             if not books:
                 break
             upsert_books(books)
+            detail_urls.extend(book.url for book in books)
             sync_state["pages_completed"] += 1
             sync_state["items_seen"] += len(books)
             if offset < max_pages - 1:
                 time.sleep(delay)
 
+        detail_urls = list(dict.fromkeys(detail_urls))
+        sync_state["phase"] = "details"
+        sync_state["details_total"] = len(detail_urls)
+        for url in detail_urls:
+            time.sleep(delay)
+            try:
+                details = fetch_post_details(url)
+                update_book_details(url, details)
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                sync_state["detail_errors"] += 1
+            finally:
+                sync_state["details_completed"] += 1
+
         finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["finished_at"] = finished
+        sync_state["phase"] = None
         set_metadata("last_sync_at", finished)
         set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
+        set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         sync_state["error"] = str(exc)
         sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sync_state["phase"] = None
     finally:
         sync_state["running"] = False
         sync_lock.release()
@@ -300,7 +464,8 @@ def list_books(query: str, sort: str) -> list[dict[str, Any]]:
     }.get(sort, "published_at IS NULL, published_at DESC, title COLLATE NOCASE")
 
     sql = """
-        SELECT id, title, url, image_url, published_at, cached_at, last_seen_at
+        SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
+               entry_type, original_post_url, download_url, detail_cached_at
         FROM books
     """
     params: tuple[str, ...] = ()

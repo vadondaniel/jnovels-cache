@@ -53,6 +53,10 @@ function renderBooks(books) {
     const titleLink = card.querySelector("h2 a");
     const image = card.querySelector("img");
     const fallback = card.querySelector(".book-card__fallback");
+    const type = card.querySelector(".book-card__type");
+    const downloadLink = card.querySelector(".book-card__action--download");
+    const seriesLink = card.querySelector(".book-card__action--series");
+    const postLink = card.querySelector(".book-card__action--post");
 
     coverLink.href = book.url;
     titleLink.href = book.url;
@@ -60,6 +64,21 @@ function renderBooks(books) {
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
     card.querySelector(".book-card__cached").textContent = `Cached ${formatDate(book.cached_at)}`;
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
+
+    type.textContent = book.entry_type === "volume" ? "Volume" : book.entry_type === "series" ? "Series" : "Not indexed";
+    type.classList.toggle("is-pending", !book.entry_type);
+
+    postLink.href = book.url;
+    if (book.download_url) {
+      downloadLink.href = book.download_url;
+    } else {
+      downloadLink.hidden = true;
+    }
+    if (book.original_post_url) {
+      seriesLink.href = book.original_post_url;
+    } else {
+      seriesLink.hidden = true;
+    }
 
     if (book.image_url) {
       image.src = book.image_url;
@@ -98,8 +117,9 @@ function updateStatus(payload) {
   elements.syncToggle.classList.toggle("is-running", sync.running);
 
   if (sync.running) {
-    elements.syncStatus.textContent =
-      `Scanning page ${sync.page} · ${sync.items_seen} results seen`;
+    elements.syncStatus.textContent = sync.phase === "details"
+      ? `Indexing post ${sync.details_completed + 1} of ${sync.details_total}`
+      : `Scanning page ${sync.page} · ${sync.items_seen} results seen`;
     elements.syncStatus.classList.add("is-running");
   } else {
     elements.syncStatus.classList.remove("is-running");

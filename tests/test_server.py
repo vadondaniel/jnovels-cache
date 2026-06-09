@@ -18,6 +18,26 @@ SAMPLE_HTML = """
 </article>
 """
 
+MAIN_POST_HTML = """
+<article>
+  <div class="post-content clear">
+    <p>You can now Download Example</p>
+    <div><a href="https://jnovels.com/faq/"><img src="download.jpg"></a></div>
+    <ol><li>VOLUME 01 Epub <a href="https://files.example/main-one">DOWNLOAD</a></li></ol>
+  </div>
+</article>
+"""
+
+VOLUME_POST_HTML = """
+<article>
+  <div class="post-content clear">
+    <p><a href="https://jnovels.com/example-light-novel-epub/">Refer to original post</a></p>
+    <div><a href="https://ads.example/banner"><img src="ad.gif"></a></div>
+    <p><a href="https://files.example/volume-16">VOLUME 16</a></p>
+  </div>
+</article>
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_extracts_search_result_metadata(self):
@@ -35,6 +55,27 @@ class ParserTests(unittest.TestCase):
         parser = server.SearchResultsParser()
         parser.feed('<h1 class="post-title"><a href="/wrong">Wrong</a></h1>')
         self.assertEqual(parser.books, [])
+
+    def test_extracts_main_series_download(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-light-novel-epub/")
+        parser.feed(MAIN_POST_HTML)
+        details = parser.details()
+
+        self.assertEqual(details.entry_type, "series")
+        self.assertIsNone(details.original_post_url)
+        self.assertEqual(details.download_url, "https://files.example/main-one")
+
+    def test_extracts_volume_series_and_download_links(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-volume-16-epub/")
+        parser.feed(VOLUME_POST_HTML)
+        details = parser.details()
+
+        self.assertEqual(details.entry_type, "volume")
+        self.assertEqual(
+            details.original_post_url,
+            "https://jnovels.com/example-light-novel-epub/",
+        )
+        self.assertEqual(details.download_url, "https://files.example/volume-16")
 
 
 class DatabaseTests(unittest.TestCase):
@@ -70,6 +111,24 @@ class DatabaseTests(unittest.TestCase):
         )
         books = server.list_books("100%", "title_asc")
         self.assertEqual([book["title"] for book in books], ["100% Example"])
+
+    def test_updates_second_pass_details(self):
+        book = server.Book("Volume 16", "https://example/book", None, "2026-01-01")
+        server.upsert_books([book])
+        server.update_book_details(
+            book.url,
+            server.PostDetails(
+                "volume",
+                "https://example/series",
+                "https://files.example/download",
+            ),
+        )
+
+        saved = server.list_books("", "published_desc")[0]
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], "https://example/series")
+        self.assertEqual(saved["download_url"], "https://files.example/download")
+        self.assertIsNotNone(saved["detail_cached_at"])
 
 
 if __name__ == "__main__":
