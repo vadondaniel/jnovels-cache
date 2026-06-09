@@ -11,29 +11,22 @@
 </head>
 <body>
   <header class="hero">
-    <div class="hero__glow"></div>
     <nav class="nav wrap">
       <a class="brand" href="/">
         <span class="brand__mark">J</span>
         <span>JNovels Cache</span>
       </a>
       <a class="source-link" href="https://jnovels.com/?s=epub" target="_blank" rel="noopener">
-        Open source site <span aria-hidden="true">↗</span>
+        Search JNovels <span aria-hidden="true">↗</span>
       </a>
     </nav>
-
-    <div class="hero__content wrap">
-      <p class="eyebrow">Your local EPUB index</p>
-      <h1>Find the next volume. <em>Skip the waiting.</em></h1>
-      <p class="lede">A fast, private cache of JNovels search results. Metadata stays on this computer.</p>
-    </div>
   </header>
 
   <main class="wrap main">
     <section class="control-panel" aria-label="Cache controls">
       <div class="search-box">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21 21-4.35-4.35m2.35-5.65a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z"/></svg>
-        <input id="search" type="search" placeholder="Search cached titles..." autocomplete="off">
+        <input id="search" type="search" placeholder="Search cached entries..." autocomplete="off">
         <kbd>/</kbd>
       </div>
 
@@ -41,11 +34,11 @@
         <label>
           <span>Sort</span>
           <select id="sort">
-            <option value="published_desc">Newest published</option>
-            <option value="published_asc">Oldest published</option>
+            <option value="published_desc">Newest release</option>
+            <option value="published_asc">Oldest release</option>
             <option value="title_asc">Title A–Z</option>
             <option value="title_desc">Title Z–A</option>
-            <option value="cached_desc">Recently cached</option>
+            <option value="cached_desc">Recently added</option>
           </select>
         </label>
 
@@ -59,28 +52,28 @@
 
     <section class="status-row" aria-live="polite">
       <div>
-        <strong id="result-count">0 titles</strong>
+        <strong id="result-count">0 entries</strong>
         <span id="last-sync">Not synced yet</span>
       </div>
       <div id="sync-status" class="sync-status"></div>
     </section>
 
-    <section id="book-grid" class="book-grid" aria-label="Cached books"></section>
+    <section id="book-grid" class="book-grid" aria-label="Cached entries"></section>
 
     <section id="empty-state" class="empty-state" hidden>
       <div class="empty-state__mark">J</div>
-      <h2>No cached titles yet</h2>
-      <p>Run a sync to cache the latest EPUB search pages.</p>
-      <button id="empty-sync" class="button button--primary" type="button">Set up first sync</button>
+      <h2>The cache is empty</h2>
+      <p>Sync the newest JNovels EPUB entries to get started.</p>
+      <button id="empty-sync" class="button button--primary" type="button">Sync entries</button>
     </section>
   </main>
 
   <dialog id="sync-dialog" class="sync-dialog">
     <header class="sync-dialog__header">
       <div>
-        <p class="eyebrow">Cache maintenance</p>
-        <h2>Sync JNovels</h2>
-        <p>Choose how much of the source index to check.</p>
+        <p class="eyebrow">Cache update</p>
+        <h2>Sync cache</h2>
+        <p>Choose which JNovels search pages to check.</p>
       </div>
       <button id="sync-close" class="sync-dialog__close" type="button" aria-label="Close sync options">×</button>
     </header>
@@ -89,8 +82,8 @@
       <label class="sync-field">
         <span>Sync mode</span>
         <select id="sync-mode">
-          <option value="catchup">Catch up new releases</option>
-          <option value="extend">Extend older cache</option>
+          <option value="catchup">Check for new entries</option>
+          <option value="extend">Add older entries</option>
           <option value="manual">Scan a page range</option>
         </select>
       </label>
@@ -101,11 +94,11 @@
           <input id="start-page" type="number" min="1" max="10000" value="1" required>
         </label>
         <label class="sync-field">
-          <span id="max-pages-label">Safety page limit</span>
+          <span id="max-pages-label">Page limit</span>
           <input id="max-pages" type="number" min="1" max="200" value="20" required>
         </label>
         <label class="sync-field">
-          <span>Delay between pages</span>
+          <span>Request delay</span>
           <div class="sync-field__unit">
             <input id="delay" type="number" min="0.5" max="10" step="0.5" value="1" required>
             <span>sec</span>
@@ -113,7 +106,7 @@
         </label>
       </div>
 
-      <p id="sync-help" class="sync-dialog__help">Starts from the newest page and stops automatically when cached entries are reached.</p>
+      <p id="sync-help" class="sync-dialog__help">Checks newest entries first and stops after reaching entries already in the cache.</p>
 
       <footer class="sync-dialog__actions">
         <button id="sync-cancel" class="button button--quiet" type="button">Cancel</button>
@@ -139,11 +132,11 @@
         <h2><a target="_blank" rel="noopener"></a></h2>
         <div class="book-card__actions">
           <a class="book-card__action book-card__action--download" target="_blank" rel="noopener">Download</a>
-          <button class="book-card__action book-card__action--catalog" type="button">Catalog</button>
+          <button class="book-card__action book-card__action--catalog" type="button">Volumes</button>
         </div>
         <div class="book-card__links">
           <a class="book-card__action--series" target="_blank" rel="noopener">Series page</a>
-          <a class="book-card__action--post" target="_blank" rel="noopener">Post</a>
+          <a class="book-card__action--post" target="_blank" rel="noopener">Entry page</a>
         </div>
       </div>
     </article>
@@ -152,11 +145,11 @@
   <dialog id="catalog-dialog" class="catalog-dialog">
     <div class="catalog-dialog__header">
       <div>
-        <p class="eyebrow">Cached series catalog</p>
-        <h2 id="catalog-title">Series volumes</h2>
+        <p class="eyebrow">Cached volumes</p>
+        <h2 id="catalog-title">Series</h2>
         <p id="catalog-count"></p>
       </div>
-      <button id="catalog-close" class="catalog-dialog__close" type="button" aria-label="Close catalog">×</button>
+      <button id="catalog-close" class="catalog-dialog__close" type="button" aria-label="Close volumes">×</button>
     </div>
     <div id="catalog-list" class="catalog-dialog__list"></div>
     <div class="catalog-dialog__footer">

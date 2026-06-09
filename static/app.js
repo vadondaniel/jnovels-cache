@@ -36,7 +36,7 @@ const elements = {
 };
 
 function formatDate(value, options = { year: "numeric", month: "short", day: "numeric" }) {
-  if (!value) return "Date unknown";
+  if (!value) return "Date unavailable";
   const date = new Date(value.length === 10 ? `${value}T12:00:00` : value);
   if (Number.isNaN(date.getTime())) return value;
   return new Intl.DateTimeFormat(undefined, options).format(date);
@@ -77,7 +77,7 @@ function renderBooks(books) {
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
 
     type.textContent = book.volume_label
-      || (book.entry_type === "series" ? "Series" : "Not indexed");
+      || (book.entry_type === "series" ? "Series" : "Details pending");
     type.classList.toggle("is-pending", !book.entry_type);
 
     postLink.href = book.url;
@@ -92,7 +92,7 @@ function renderBooks(books) {
       seriesLink.hidden = true;
     }
     if (book.volume_count) {
-      catalogButton.textContent = `Catalog · ${book.volume_count}`;
+      catalogButton.textContent = `Volumes · ${book.volume_count}`;
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
@@ -101,8 +101,8 @@ function renderBooks(books) {
     if (book.entry_type === "series" && book.volume_count) {
       coverLink.href = "#";
       titleLink.href = "#";
-      coverLink.setAttribute("aria-label", `Open cached catalog for ${book.series_title}`);
-      titleLink.title = "Open cached catalog";
+      coverLink.setAttribute("aria-label", `Browse cached volumes for ${book.series_title}`);
+      titleLink.title = "Browse cached volumes";
       const openBookCatalog = (event) => {
         event.preventDefault();
         openCatalog(book);
@@ -133,13 +133,13 @@ function renderBooks(books) {
   });
 
   elements.grid.append(fragment);
-  elements.count.textContent = `${books.length} ${books.length === 1 ? "title" : "titles"}`;
+  elements.count.textContent = `${books.length} ${books.length === 1 ? "entry" : "entries"}`;
   elements.empty.hidden = books.length !== 0 || Boolean(elements.search.value.trim());
 }
 
 async function openCatalog(book) {
   elements.catalogTitle.textContent = book.series_title;
-  elements.catalogCount.textContent = "Loading cached volumes...";
+  elements.catalogCount.textContent = "Loading volumes...";
   elements.catalogList.replaceChildren();
   elements.catalogSeriesLink.href = book.series_url;
   elements.catalogDialog.showModal();
@@ -147,7 +147,7 @@ async function openCatalog(book) {
   try {
     const payload = await request(`/api/series?${new URLSearchParams({ url: book.series_url })}`);
     elements.catalogCount.textContent =
-      `${payload.count} ${payload.count === 1 ? "volume" : "volumes"} cached`;
+      `${payload.count} cached ${payload.count === 1 ? "volume" : "volumes"}`;
     const fragment = document.createDocumentFragment();
     const grouped = new Map();
     payload.volumes.forEach((volume) => {
@@ -177,7 +177,7 @@ async function openCatalog(book) {
         label.textContent = volume.label;
         date.textContent = volume.published_at
           ? `Released ${formatDate(volume.published_at)}`
-          : "Release date not cached";
+          : "Release date unavailable";
         date.classList.toggle("is-known", Boolean(volume.published_at));
         arrow.textContent = "↗";
         arrow.setAttribute("aria-hidden", "true");
@@ -190,7 +190,7 @@ async function openCatalog(book) {
     });
     elements.catalogList.append(fragment);
   } catch (error) {
-    elements.catalogCount.textContent = "Could not load this catalog.";
+    elements.catalogCount.textContent = "Could not load these volumes.";
     showToast(error.message, true);
   }
 }
@@ -220,10 +220,10 @@ function updateStatus(payload) {
   if (sync.running) {
     if (sync.phase === "series") {
       elements.syncStatus.textContent =
-        `Caching series ${Math.min(sync.series_completed + 1, sync.series_total)} of ${sync.series_total}`;
+        `Updating series ${Math.min(sync.series_completed + 1, sync.series_total)} of ${sync.series_total}`;
     } else if (sync.phase === "details") {
       elements.syncStatus.textContent =
-        `Indexing post ${Math.min(sync.details_completed + 1, sync.details_total)} of ${sync.details_total}`;
+        `Checking entry ${Math.min(sync.details_completed + 1, sync.details_total)} of ${sync.details_total}`;
     } else {
       const prefix = sync.mode === "extend"
         ? "Finding older uncached entries"
@@ -239,7 +239,7 @@ function updateStatus(payload) {
     elements.syncStatus.textContent = sync.error
       ? `Last sync failed: ${sync.error}`
       : lastSync
-        ? `${payload.count} total cached`
+        ? `${payload.count} cached ${payload.count === 1 ? "entry" : "entries"}`
         : "";
   }
 }
@@ -248,20 +248,20 @@ function updateSyncMode() {
   const mode = elements.syncMode.value;
   elements.startPageField.hidden = mode !== "manual";
   if (mode === "catchup") {
-    elements.maxPagesLabel.textContent = "Safety page limit";
+    elements.maxPagesLabel.textContent = "Page limit";
     elements.maxPages.value = "20";
     elements.syncHelp.textContent =
-      "Starts from the newest page and stops automatically when cached entries are reached.";
+      "Checks newest entries first and stops after reaching entries already in the cache.";
   } else if (mode === "extend") {
-    elements.maxPagesLabel.textContent = "Older pages to add";
+    elements.maxPagesLabel.textContent = "Pages to add";
     elements.maxPages.value = "10";
     elements.syncHelp.textContent =
-      "Finds the current cache frontier, then continues into older uncached result pages.";
+      "Finds the oldest cached search page, then adds the next older pages.";
   } else {
     elements.maxPagesLabel.textContent = "Pages to scan";
     elements.maxPages.value = "6";
     elements.syncHelp.textContent =
-      "Scans an exact page range, including already cached entries.";
+      "Checks an exact page range, including entries already in the cache.";
   }
 }
 
@@ -278,7 +278,7 @@ async function loadStatus() {
       state.pollTimer = setTimeout(loadStatus, 850);
     } else if (wasRunning) {
       await loadBooks();
-      showToast(payload.sync.error ? "Sync stopped with an error." : "Cache sync complete.", Boolean(payload.sync.error));
+      showToast(payload.sync.error ? "Sync failed." : "Cache updated.", Boolean(payload.sync.error));
     }
   } catch (error) {
     showToast(error.message, true);
