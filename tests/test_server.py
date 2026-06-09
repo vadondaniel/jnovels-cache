@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import server
 
@@ -64,6 +64,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(details.entry_type, "series")
         self.assertIsNone(details.original_post_url)
         self.assertEqual(details.download_url, "https://files.example/main-one")
+        self.assertEqual(
+            details.volumes,
+            [server.SeriesVolume("Volume 01", "https://files.example/main-one", 0)],
+        )
 
     def test_extracts_volume_series_and_download_links(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-volume-16-epub/")
@@ -129,6 +133,84 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["original_post_url"], "https://example/series")
         self.assertEqual(saved["download_url"], "https://files.example/download")
         self.assertIsNotNone(saved["detail_cached_at"])
+
+    def test_replaces_and_exposes_series_volume_list(self):
+        book = server.Book("Example Series", "https://example/series", None, None)
+        server.upsert_books([book])
+        server.update_book_details(
+            book.url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 01", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 02", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+
+        saved = server.list_books("", "published_desc")[0]
+        self.assertEqual(saved["volume_count"], 2)
+        self.assertEqual(saved["series_url"], "https://example/series")
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(book.url)],
+            ["Volume 01", "Volume 02"],
+        )
+
+
+class SyncTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "cache.db"
+        self.db_patch = patch.object(server, "DB_PATH", self.db_path)
+        self.db_patch.start()
+        server.initialize_db()
+
+    def tearDown(self):
+        self.db_patch.stop()
+        self.temp_dir.cleanup()
+
+    def test_new_volume_refreshes_original_series_catalog(self):
+        volume_url = "https://jnovels.com/example-volume-3-epub/"
+        series_url = "https://jnovels.com/example-light-novel-epub/"
+        search_book = server.Book("Example Volume 3 Epub", volume_url, None, None)
+        volume_details = server.PostDetails(
+            "volume",
+            series_url,
+            "https://files.example/v3",
+        )
+        series_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [
+                server.SeriesVolume("Volume 01", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 02", "https://files.example/v2", 1),
+                server.SeriesVolume("Volume 03", "https://files.example/v3", 2),
+            ],
+        )
+
+        def fake_details(url):
+            return volume_details if url == volume_url else series_details
+
+        with (
+            patch.object(server, "fetch_page", return_value=[search_book]),
+            patch.object(server, "fetch_post_details", side_effect=fake_details) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5)
+
+        self.assertEqual(
+            fetch_details.call_args_list,
+            [call(volume_url), call(series_url)],
+        )
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(series_url)],
+            ["Volume 01", "Volume 02", "Volume 03"],
+        )
+        self.assertEqual(server.sync_state["series_completed"], 1)
+        self.assertEqual(server.sync_state["series_errors"], 0)
 
 
 if __name__ == "__main__":

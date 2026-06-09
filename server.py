@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -11,7 +12,7 @@ import urllib.parse
 import urllib.request
 import webbrowser
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from http import HTTPStatus
@@ -44,6 +45,14 @@ class PostDetails:
     entry_type: str
     original_post_url: str | None
     download_url: str | None
+    volumes: list["SeriesVolume"] = field(default_factory=list)
+
+
+@dataclass
+class SeriesVolume:
+    label: str
+    download_url: str
+    position: int
 
 
 class PostDetailsParser(HTMLParser):
@@ -52,9 +61,13 @@ class PostDetailsParser(HTMLParser):
         self.post_url = post_url
         self.original_post_url: str | None = None
         self.download_url: str | None = None
+        self.volumes: list[SeriesVolume] = []
         self._content_depth = 0
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
+        self._list_item_depth = 0
+        self._list_item_parts: list[str] = []
+        self._list_item_download_url: str | None = None
 
     @staticmethod
     def _classes(attrs: dict[str, str | None]) -> set[str]:
@@ -72,18 +85,29 @@ class PostDetailsParser(HTMLParser):
         if tag == "a" and self._content_depth:
             self._anchor_href = attrs.get("href")
             self._anchor_parts = []
+        elif tag == "li" and self._content_depth:
+            self._list_item_depth += 1
+            if self._list_item_depth == 1:
+                self._list_item_parts = []
+                self._list_item_download_url = None
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "a" and self._content_depth and self._anchor_href:
             self._finish_anchor()
             self._anchor_href = None
             self._anchor_parts = []
+        elif tag == "li" and self._content_depth and self._list_item_depth:
+            if self._list_item_depth == 1:
+                self._finish_list_item()
+            self._list_item_depth -= 1
         elif tag == "div" and self._content_depth:
             self._content_depth -= 1
 
     def handle_data(self, data: str) -> None:
         if self._anchor_href:
             self._anchor_parts.append(data)
+        if self._list_item_depth:
+            self._list_item_parts.append(data)
 
     def _finish_anchor(self) -> None:
         href = urllib.parse.urljoin(self.post_url, self._anchor_href or "")
@@ -94,14 +118,36 @@ class PostDetailsParser(HTMLParser):
             self.original_post_url = href
             return
 
-        if self.download_url or not is_external_http_url(href):
+        if not is_external_http_url(href):
             return
-        if "download" in normalized or is_volume_label(normalized):
+        if self._list_item_depth and "download" in normalized:
+            self._list_item_download_url = href
+        if not self.download_url and (
+            "download" in normalized or is_volume_label(normalized)
+        ):
             self.download_url = href
+
+    def _finish_list_item(self) -> None:
+        if not self._list_item_download_url:
+            return
+        text = " ".join("".join(self._list_item_parts).split())
+        match = re.search(r"\bVOLUME\s+([0-9]+(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
+        if not match:
+            return
+        number = match.group(1)
+        label = f"Volume {number}"
+        self.volumes.append(
+            SeriesVolume(label, self._list_item_download_url, len(self.volumes))
+        )
 
     def details(self) -> PostDetails:
         entry_type = "volume" if self.original_post_url else "series"
-        return PostDetails(entry_type, self.original_post_url, self.download_url)
+        return PostDetails(
+            entry_type,
+            self.original_post_url,
+            self.download_url,
+            self.volumes if entry_type == "series" else [],
+        )
 
 
 class SearchResultsParser(HTMLParser):
@@ -254,6 +300,19 @@ def initialize_db() -> None:
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS series_volumes (
+                id INTEGER PRIMARY KEY,
+                series_url TEXT NOT NULL,
+                label TEXT NOT NULL,
+                download_url TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                cached_at TEXT NOT NULL,
+                UNIQUE(series_url, download_url)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_series_volumes_url
+            ON series_volumes(series_url, position);
             """
         )
         existing_columns = {
@@ -371,6 +430,34 @@ def update_book_details(url: str, details: PostDetails) -> None:
                 url,
             ),
         )
+    if details.entry_type == "series":
+        replace_series_volumes(url, details.volumes)
+
+
+def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            "DELETE FROM series_volumes WHERE series_url = ?",
+            (series_url,),
+        )
+        connection.executemany(
+            """
+            INSERT INTO series_volumes
+                (series_url, label, download_url, position, cached_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    series_url,
+                    volume.label,
+                    volume.download_url,
+                    volume.position,
+                    now,
+                )
+                for volume in volumes
+            ],
+        )
 
 
 sync_lock = threading.Lock()
@@ -384,6 +471,9 @@ sync_state: dict[str, Any] = {
     "details_completed": 0,
     "details_total": 0,
     "detail_errors": 0,
+    "series_completed": 0,
+    "series_total": 0,
+    "series_errors": 0,
     "error": None,
     "started_at": None,
     "finished_at": None,
@@ -406,6 +496,9 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
                 "details_completed": 0,
                 "details_total": 0,
                 "detail_errors": 0,
+                "series_completed": 0,
+                "series_total": 0,
+                "series_errors": 0,
                 "error": None,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "finished_at": None,
@@ -429,15 +522,33 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
         detail_urls = list(dict.fromkeys(detail_urls))
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
+        discovered_series_urls: set[str] = set()
         for url in detail_urls:
             time.sleep(delay)
             try:
                 details = fetch_post_details(url)
                 update_book_details(url, details)
+                if details.entry_type == "series":
+                    discovered_series_urls.add(url)
+                elif details.original_post_url:
+                    discovered_series_urls.add(details.original_post_url)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 sync_state["detail_errors"] += 1
             finally:
                 sync_state["details_completed"] += 1
+
+        missing_series_urls = sorted(discovered_series_urls - set(detail_urls))
+        sync_state["phase"] = "series"
+        sync_state["series_total"] = len(missing_series_urls)
+        for series_url in missing_series_urls:
+            time.sleep(delay)
+            try:
+                details = fetch_post_details(series_url)
+                replace_series_volumes(series_url, details.volumes)
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+                sync_state["series_errors"] += 1
+            finally:
+                sync_state["series_completed"] += 1
 
         finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["finished_at"] = finished
@@ -445,6 +556,7 @@ def run_sync(start_page: int, max_pages: int, delay: float) -> None:
         set_metadata("last_sync_at", finished)
         set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
         set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
+        set_metadata("last_series_errors", str(sync_state["series_errors"]))
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         sync_state["error"] = str(exc)
         sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -477,6 +589,43 @@ def list_books(query: str, sort: str) -> list[dict[str, Any]]:
 
     with connect_db() as connection:
         rows = connection.execute(sql, params).fetchall()
+        volume_rows = connection.execute(
+            """
+            SELECT series_url, label, download_url, position, cached_at
+            FROM series_volumes
+            ORDER BY series_url, position
+            """
+        ).fetchall()
+
+    volumes_by_series: dict[str, list[dict[str, Any]]] = {}
+    for row in volume_rows:
+        volume = dict(row)
+        series_url = volume.pop("series_url")
+        volumes_by_series.setdefault(series_url, []).append(volume)
+
+    books = [dict(row) for row in rows]
+    for book in books:
+        series_url = (
+            book["original_post_url"]
+            if book["entry_type"] == "volume"
+            else book["url"] if book["entry_type"] == "series" else None
+        )
+        book["series_url"] = series_url
+        book["volume_count"] = len(volumes_by_series.get(series_url or "", []))
+    return books
+
+
+def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT label, download_url, position, cached_at
+            FROM series_volumes
+            WHERE series_url = ?
+            ORDER BY position
+            """,
+            (series_url,),
+        ).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -498,6 +647,21 @@ class AppHandler(SimpleHTTPRequestHandler):
                 count = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
             self.send_json(
                 {"sync": dict(sync_state), "count": count, "metadata": get_metadata()}
+            )
+            return
+        if parsed.path == "/api/series":
+            params = urllib.parse.parse_qs(parsed.query)
+            series_url = params.get("url", [""])[0].strip()
+            if not series_url:
+                self.send_json({"error": "Missing series URL."}, HTTPStatus.BAD_REQUEST)
+                return
+            volumes = list_series_volumes(series_url)
+            self.send_json(
+                {
+                    "series_url": series_url,
+                    "volumes": volumes,
+                    "count": len(volumes),
+                }
             )
             return
         if parsed.path == "/":

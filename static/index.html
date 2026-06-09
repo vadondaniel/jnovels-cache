@@ -108,12 +108,28 @@
         <div class="book-card__actions">
           <a class="book-card__action book-card__action--download" target="_blank" rel="noopener">Download</a>
           <a class="book-card__action book-card__action--series" target="_blank" rel="noopener">Series</a>
+          <button class="book-card__action book-card__action--catalog" type="button">Catalog</button>
           <a class="book-card__action book-card__action--post" target="_blank" rel="noopener">Post</a>
         </div>
         <p class="book-card__cached"></p>
       </div>
     </article>
   </template>
+
+  <dialog id="catalog-dialog" class="catalog-dialog">
+    <div class="catalog-dialog__header">
+      <div>
+        <p class="eyebrow">Cached series catalog</p>
+        <h2 id="catalog-title">Series volumes</h2>
+        <p id="catalog-count"></p>
+      </div>
+      <button id="catalog-close" class="catalog-dialog__close" type="button" aria-label="Close catalog">×</button>
+    </div>
+    <div id="catalog-list" class="catalog-dialog__list"></div>
+    <div class="catalog-dialog__footer">
+      <a id="catalog-series-link" target="_blank" rel="noopener">Open series page <span aria-hidden="true">↗</span></a>
+    </div>
+  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 </body>
