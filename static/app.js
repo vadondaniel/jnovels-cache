@@ -40,6 +40,7 @@ const elements = {
   repairSummary: document.querySelector("#repair-summary"),
   repairList: document.querySelector("#repair-list"),
   repairClose: document.querySelector("#repair-close"),
+  refreshSeries: document.querySelector("#refresh-series"),
   repairAll: document.querySelector("#repair-all"),
   empty: document.querySelector("#empty-state"),
   emptyTitle: document.querySelector("#empty-title"),
@@ -317,9 +318,13 @@ function updateStatus(payload) {
   elements.lastSync.textContent = lastSync ? `Last synced ${formatDate(lastSync)}` : "Not synced yet";
   elements.syncToggle.disabled = sync.running;
   elements.syncToggle.classList.toggle("is-running", sync.running);
-  elements.cacheHealth.hidden = sync.running || !health.pending_details;
+  elements.cacheHealth.hidden =
+    sync.running || (!health.pending_details && !health.stale_series);
   const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
-  elements.cacheHealth.textContent = `${health.pending_details || 0} pending${failedText}`;
+  const healthParts = [];
+  if (health.pending_details) healthParts.push(`${health.pending_details} pending${failedText}`);
+  if (health.stale_series) healthParts.push(`${health.stale_series} stale series`);
+  elements.cacheHealth.textContent = healthParts.join(" · ");
   elements.cacheHealth.title = health.paused_retries
     ? `${health.paused_retries} entries paused after repeated failures. Open repair options.`
     : "Open repair options";
@@ -372,6 +377,12 @@ function updateSyncMode() {
     elements.maxPages.max = "2000";
     elements.syncHelp.textContent =
       "Rechecks cached entries with missing details, then refreshes any linked series pages.";
+  } else if (mode === "series_refresh") {
+    elements.maxPagesLabel.textContent = "Series limit";
+    elements.maxPages.value = "250";
+    elements.maxPages.max = "2000";
+    elements.syncHelp.textContent =
+      "Refreshes series catalogs older than 30 days or superseded by a newer cached volume.";
   } else {
     elements.maxPagesLabel.textContent = "Pages to scan";
     elements.maxPages.value = "6";
@@ -427,9 +438,13 @@ async function openRepairStatus() {
   try {
     const payload = await request("/api/repair-failures");
     const pending = state.health.pending_details || 0;
+    const staleSeries = state.health.stale_series || 0;
+    const staleText = staleSeries
+      ? ` · ${staleSeries} stale ${staleSeries === 1 ? "series" : "series"}`
+      : "";
     elements.repairSummary.textContent = payload.count
-      ? `${pending} pending entries · ${payload.count} with recorded failures`
-      : `${pending} entries are waiting for details. No recorded failures.`;
+      ? `${pending} pending entries · ${payload.count} with recorded failures${staleText}`
+      : `${pending} entries are waiting for details${staleText}. No recorded failures.`;
 
     if (!payload.count) {
       const empty = document.createElement("p");
@@ -489,6 +504,12 @@ elements.repairDialog.addEventListener("click", (event) => {
 elements.repairAll.addEventListener("click", () => {
   elements.repairDialog.close();
   elements.syncMode.value = "repair";
+  updateSyncMode();
+  openSyncOptions();
+});
+elements.refreshSeries.addEventListener("click", () => {
+  elements.repairDialog.close();
+  elements.syncMode.value = "series_refresh";
   updateSyncMode();
   openSyncOptions();
 });

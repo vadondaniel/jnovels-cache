@@ -106,6 +106,7 @@
           <option value="catchup">Check for new entries</option>
           <option value="extend">Add older entries</option>
           <option value="repair">Repair missing details</option>
+          <option value="series_refresh">Refresh stale series</option>
           <option value="manual">Scan a page range</option>
         </select>
       </label>
@@ -148,6 +149,7 @@
     </header>
     <div id="repair-list" class="repair-dialog__list"></div>
     <footer class="repair-dialog__footer">
+      <button id="refresh-series" class="button button--quiet" type="button">Refresh stale series</button>
       <button id="repair-all" class="button button--dark" type="button">Repair pending entries</button>
     </footer>
   </dialog>

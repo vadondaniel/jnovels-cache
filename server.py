@@ -13,7 +13,7 @@ import urllib.request
 import webbrowser
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +30,8 @@ DEFAULT_PAGE_SIZE = 24
 MAX_PAGE_SIZE = 100
 AUTO_REPAIR_LIMIT = 20
 AUTO_REPAIR_MAX_ATTEMPTS = 3
+AUTO_SERIES_REFRESH_LIMIT = 5
+SERIES_STALE_DAYS = 30
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -378,6 +380,11 @@ def initialize_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_series_volumes_url
             ON series_volumes(series_url, position);
+
+            CREATE TABLE IF NOT EXISTS series_status (
+                series_url TEXT PRIMARY KEY,
+                checked_at TEXT NOT NULL
+            );
             """
         )
         existing_columns = {
@@ -403,6 +410,14 @@ def initialize_db() -> None:
             connection.execute(
                 "ALTER TABLE series_volumes ADD COLUMN release_group TEXT"
             )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO series_status (series_url, checked_at)
+            SELECT series_url, MAX(cached_at)
+            FROM series_volumes
+            GROUP BY series_url
+            """
+        )
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -539,6 +554,14 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
                 for volume in volumes
             ],
         )
+        connection.execute(
+            """
+            INSERT INTO series_status (series_url, checked_at)
+            VALUES (?, ?)
+            ON CONFLICT(series_url) DO UPDATE SET checked_at = excluded.checked_at
+            """,
+            (series_url, now),
+        )
 
 
 def get_cached_urls() -> set[str]:
@@ -660,11 +683,65 @@ def get_cache_health() -> dict[str, int]:
               AND detail_last_error IS NOT NULL
             """
         ).fetchone()[0]
+        stale_series = count_stale_series(connection=connection)
     return {
         "pending_details": pending,
         "failed_retries": failed,
         "paused_retries": paused,
+        "stale_series": stale_series,
     }
+
+
+def series_stale_cutoff() -> str:
+    return (
+        datetime.now(timezone.utc) - timedelta(days=SERIES_STALE_DAYS)
+    ).isoformat(timespec="seconds")
+
+
+def stale_series_where_clause() -> str:
+    return """
+        (
+            ss.checked_at < ?
+            OR EXISTS (
+                SELECT 1
+                FROM books AS b
+                WHERE b.original_post_url = ss.series_url
+                  AND b.cached_at > ss.checked_at
+            )
+        )
+    """
+
+
+def count_stale_series(*, connection: sqlite3.Connection | None = None) -> int:
+    def count(active_connection: sqlite3.Connection) -> int:
+        return active_connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM series_status AS ss
+            WHERE {stale_series_where_clause()}
+            """,
+            (series_stale_cutoff(),),
+        ).fetchone()[0]
+
+    if connection is not None:
+        return count(connection)
+    with connect_db() as active_connection:
+        return count(active_connection)
+
+
+def get_stale_series_urls(limit: int) -> list[str]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT ss.series_url
+            FROM series_status AS ss
+            WHERE {stale_series_where_clause()}
+            ORDER BY ss.checked_at, ss.series_url
+            LIMIT ?
+            """,
+            (series_stale_cutoff(), limit),
+        ).fetchall()
+    return [row["series_url"] for row in rows]
 
 
 def list_repair_failures(limit: int = 100) -> list[dict[str, Any]]:
@@ -856,9 +933,14 @@ def run_sync(
             }
         )
 
+        scheduled_series_urls: set[str] = set()
         if detail_urls_override is not None:
             books = []
             detail_urls = list(dict.fromkeys(detail_urls_override))
+        elif mode == "series_refresh":
+            books = []
+            detail_urls = []
+            scheduled_series_urls.update(get_stale_series_urls(max_pages))
         elif mode == "repair":
             books: list[Book] = []
             detail_urls = get_incomplete_detail_urls(max_pages)
@@ -873,6 +955,9 @@ def run_sync(
                     max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
                     exclude_urls=set(detail_urls),
                 )
+            )
+            scheduled_series_urls.update(
+                get_stale_series_urls(AUTO_SERIES_REFRESH_LIMIT)
             )
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
@@ -892,7 +977,9 @@ def run_sync(
             finally:
                 sync_state["details_completed"] += 1
 
-        missing_series_urls = sorted(discovered_series_urls - set(detail_urls))
+        missing_series_urls = sorted(
+            (discovered_series_urls | scheduled_series_urls) - set(detail_urls)
+        )
         sync_state["phase"] = "series"
         sync_state["series_total"] = len(missing_series_urls)
         for series_url in missing_series_urls:
@@ -1184,10 +1271,16 @@ class AppHandler(SimpleHTTPRequestHandler):
                 return
 
             mode = str(payload.get("mode", "catchup")).strip().casefold()
-            if mode not in {"catchup", "extend", "manual", "repair"}:
+            if mode not in {
+                "catchup",
+                "extend",
+                "manual",
+                "repair",
+                "series_refresh",
+            }:
                 raise ValueError("Unknown sync mode")
             start_page = min(max(int(payload.get("start_page", 1)), 1), 10000)
-            max_limit = 2000 if mode == "repair" else 200
+            max_limit = 2000 if mode in {"repair", "series_refresh"} else 200
             max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
             delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
         except (ValueError, TypeError, json.JSONDecodeError):

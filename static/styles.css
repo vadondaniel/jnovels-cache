@@ -832,6 +832,7 @@ kbd {
 .repair-dialog__footer {
   display: flex;
   justify-content: flex-end;
+  gap: 10px;
   padding: 16px 20px;
   background: var(--surface-raised);
   border-top: 1px solid var(--line);
@@ -988,6 +989,7 @@ kbd {
   .sync-dialog__header, .sync-dialog__form { padding-right: 20px; padding-left: 20px; }
   .sync-dialog__actions .button { flex: 1; }
   .repair-failure { align-items: flex-start; }
+  .repair-dialog__footer { flex-direction: column; }
   .repair-dialog__footer .button { width: 100%; }
   .status-row { align-items: flex-start; gap: 8px; padding: 20px 0; flex-direction: column; }
   .status-row__activity { justify-content: flex-start; flex-wrap: wrap; }

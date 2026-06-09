@@ -313,6 +313,7 @@ class DatabaseTests(unittest.TestCase):
                 "pending_details": 1,
                 "failed_retries": 1,
                 "paused_retries": 1,
+                "stale_series": 0,
             },
         )
         failures = server.list_repair_failures()
@@ -336,6 +337,62 @@ class DatabaseTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["detail_attempts"], 0)
         self.assertIsNone(row["detail_last_error"])
+
+    def test_finds_series_stale_by_age_or_newer_cached_volume(self):
+        old_series = "https://example/old-series"
+        changed_series = "https://example/changed-series"
+        for url in (old_series, changed_series):
+            server.upsert_books([server.Book(url.rsplit("/", 1)[-1], url, None, None)])
+            server.update_book_details(
+                url,
+                server.PostDetails(
+                    "series",
+                    None,
+                    f"https://files.example/{url.rsplit('/', 1)[-1]}",
+                    [
+                        server.SeriesVolume(
+                            "Volume 1",
+                            f"https://files.example/{url.rsplit('/', 1)[-1]}",
+                            0,
+                        )
+                    ],
+                ),
+            )
+
+        volume = server.Book(
+            "Changed Volume 2",
+            "https://example/changed-volume-2",
+            None,
+            None,
+        )
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails(
+                "volume",
+                changed_series,
+                "https://files.example/changed-v2",
+            ),
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE series_status SET checked_at = ? WHERE series_url = ?",
+                ("2020-01-01T00:00:00+00:00", old_series),
+            )
+            connection.execute(
+                "UPDATE series_status SET checked_at = ? WHERE series_url = ?",
+                ("2026-06-09T00:00:00+00:00", changed_series),
+            )
+            connection.execute(
+                "UPDATE books SET cached_at = ? WHERE url = ?",
+                ("2026-06-10T00:00:00+00:00", volume.url),
+            )
+
+        self.assertEqual(
+            set(server.get_stale_series_urls(10)),
+            {old_series, changed_series},
+        )
+        self.assertEqual(server.count_stale_series(), 2)
 
 
 class SyncTests(unittest.TestCase):
@@ -488,6 +545,100 @@ class SyncTests(unittest.TestCase):
         fetch_page.assert_not_called()
         fetch_details.assert_called_once_with(second_url)
         self.assertEqual(server.get_incomplete_detail_urls(10), [first_url])
+
+    def test_series_refresh_mode_only_processes_stale_catalogs(self):
+        series_url = "https://jnovels.com/stale-series/"
+        server.upsert_books([server.Book("Stale Series", series_url, None, None)])
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+            ),
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE series_status SET checked_at = ? WHERE series_url = ?",
+                ("2020-01-01T00:00:00+00:00", series_url),
+            )
+        refreshed = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+            ],
+        )
+
+        with (
+            patch.object(server, "fetch_page") as fetch_page,
+            patch.object(server, "fetch_post_details", return_value=refreshed) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 10, 0.5, "series_refresh")
+
+        fetch_page.assert_not_called()
+        fetch_details.assert_called_once_with(series_url)
+        self.assertEqual(server.count_stale_series(), 0)
+        self.assertEqual(len(server.list_series_volumes(series_url)), 2)
+
+    def test_normal_sync_automatically_refreshes_stale_series(self):
+        series_url = "https://jnovels.com/stale-series/"
+        new_url = "https://jnovels.com/new-entry/"
+        server.upsert_books([server.Book("Stale Series", series_url, None, None)])
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+            ),
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE series_status SET checked_at = ? WHERE series_url = ?",
+                ("2020-01-01T00:00:00+00:00", series_url),
+            )
+
+        new_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/new",
+            [server.SeriesVolume("Volume 1", "https://files.example/new", 0)],
+        )
+        refreshed = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+            ],
+        )
+
+        def fake_details(url):
+            return refreshed if url == series_url else new_details
+
+        with (
+            patch.object(
+                server,
+                "fetch_page",
+                return_value=[server.Book("New Entry", new_url, None, None)],
+            ),
+            patch.object(server, "fetch_post_details", side_effect=fake_details) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5, "catchup")
+
+        self.assertEqual(
+            fetch_details.call_args_list,
+            [call(new_url), call(series_url)],
+        )
+        self.assertEqual(server.count_stale_series(), 0)
 
     def test_catchup_stops_on_first_page_overlapping_cache(self):
         known_url = "https://jnovels.com/known/"

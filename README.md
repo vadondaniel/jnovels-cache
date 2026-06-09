@@ -25,10 +25,13 @@ The app opens at <http://127.0.0.1:8765>.
      requested number of older uncached pages.
    - **Repair missing details** revisits cached entries whose download, series,
      or volume-list metadata was not completed by an earlier sync.
+   - **Refresh stale series** revisits catalogs older than 30 days or linked
+     to a volume cached after the catalog's last check.
    - **Scan a page range** checks an explicit starting page and page count.
 3. Select **Start sync**. The app scans search pages, then visits each result
    post to identify its entry type and associated links. Normal syncs also
    retry a small number of older incomplete entries automatically.
+   Normal syncs also refresh a small number of stale series catalogs.
 4. Search and sort the cached results without waiting for JNovels search pages.
    Results are shown 24 at a time; use the page field to jump directly to any
    result page. Search, sort, entry filter, and page are preserved in the URL
