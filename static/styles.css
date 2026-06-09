@@ -399,6 +399,7 @@ select, .sync-options input {
   font-weight: 750;
   letter-spacing: .07em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .book-card__type.is-pending {

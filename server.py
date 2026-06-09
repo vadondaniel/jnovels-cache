@@ -142,7 +142,7 @@ class PostDetailsParser(HTMLParser):
         match = re.search(r"\bVOLUME\s+([0-9]+(?:\.[0-9]+)?)\b", text, re.IGNORECASE)
         if not match:
             return
-        number = match.group(1)
+        number = normalize_volume_number(match.group(1))
         label = f"Volume {number}"
         self.volumes.append(
             SeriesVolume(
@@ -272,6 +272,43 @@ def is_external_http_url(value: str) -> bool:
 def is_volume_label(value: str) -> bool:
     parts = value.strip().split()
     return len(parts) >= 2 and parts[0] == "volume" and parts[1].isdigit()
+
+
+def normalize_volume_number(value: str) -> str:
+    whole, separator, fraction = value.partition(".")
+    normalized_whole = str(int(whole))
+    return f"{normalized_whole}.{fraction}" if separator else normalized_whole
+
+
+def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
+    cleaned = re.sub(r"\s+Epub$", "", title, flags=re.IGNORECASE).strip()
+    match = re.search(
+        r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)$",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        series_title = cleaned[: match.start()].rstrip(" .…")
+        return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
+
+    slug_match = re.search(
+        r"-volume-([0-9]+(?:\.[0-9]+)?)-epub/?$",
+        urllib.parse.urlparse(url).path,
+        flags=re.IGNORECASE,
+    )
+    if slug_match:
+        return (
+            cleaned.rstrip(" .…"),
+            f"Vol. {normalize_volume_number(slug_match.group(1))}",
+        )
+
+    series_title = re.sub(
+        r"\s+Light\s+Novel$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    ).rstrip(" .…")
+    return series_title, None
 
 
 @contextmanager
@@ -628,11 +665,14 @@ def list_books(query: str, sort: str) -> list[dict[str, Any]]:
 
     books = [dict(row) for row in rows]
     for book in books:
+        series_title, volume_label = parse_book_identity(book["title"], book["url"])
         series_url = (
             book["original_post_url"]
             if book["entry_type"] == "volume"
             else book["url"] if book["entry_type"] == "series" else None
         )
+        book["series_title"] = series_title
+        book["volume_label"] = volume_label
         book["series_url"] = series_url
         book["volume_count"] = len(volumes_by_series.get(series_url or "", []))
     return books

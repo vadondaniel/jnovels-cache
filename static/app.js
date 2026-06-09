@@ -35,10 +35,6 @@ function formatDate(value, options = { year: "numeric", month: "short", day: "nu
   return new Intl.DateTimeFormat(undefined, options).format(date);
 }
 
-function displayTitle(value) {
-  return value.replace(/\s+Epub$/i, "");
-}
-
 function showToast(message, isError = false) {
   elements.toast.textContent = message;
   elements.toast.classList.toggle("is-error", isError);
@@ -71,11 +67,12 @@ function renderBooks(books) {
 
     coverLink.href = book.url;
     titleLink.href = book.url;
-    titleLink.textContent = displayTitle(book.title);
+    titleLink.textContent = book.series_title;
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
 
-    type.textContent = book.entry_type === "volume" ? "Volume" : book.entry_type === "series" ? "Series" : "Not indexed";
+    type.textContent = book.volume_label
+      || (book.entry_type === "series" ? "Series" : "Not indexed");
     type.classList.toggle("is-pending", !book.entry_type);
 
     postLink.href = book.url;
@@ -116,9 +113,7 @@ function renderBooks(books) {
 }
 
 async function openCatalog(book) {
-  elements.catalogTitle.textContent = book.entry_type === "series"
-    ? book.title
-    : book.title.replace(/\s+Volume\s+[0-9.]+\s+Epub$/i, "");
+  elements.catalogTitle.textContent = book.series_title;
   elements.catalogCount.textContent = "Loading cached volumes...";
   elements.catalogList.replaceChildren();
   elements.catalogSeriesLink.href = book.series_url;

@@ -55,6 +55,24 @@ GROUPED_SERIES_HTML = """
 
 
 class ParserTests(unittest.TestCase):
+    def test_parses_long_volume_title_into_series_and_volume_label(self):
+        title = (
+            "New Game Plus After Defeating the Last Boss: All These Beautiful, "
+            "Problematic Girls in the First Town Have Gotten Really Attached "
+            "to Me… Volume 2 Epub"
+        )
+        series_title, volume_label = server.parse_book_identity(
+            title,
+            "https://jnovels.com/example-volume-2-epub/",
+        )
+
+        self.assertEqual(
+            series_title,
+            "New Game Plus After Defeating the Last Boss: All These Beautiful, "
+            "Problematic Girls in the First Town Have Gotten Really Attached to Me",
+        )
+        self.assertEqual(volume_label, "Vol. 2")
+
     def test_extracts_search_result_metadata(self):
         parser = server.SearchResultsParser()
         parser.feed(SAMPLE_HTML)
@@ -81,7 +99,7 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(details.download_url, "https://files.example/main-one")
         self.assertEqual(
             details.volumes,
-            [server.SeriesVolume("Volume 01", "https://files.example/main-one", 0)],
+            [server.SeriesVolume("Volume 1", "https://files.example/main-one", 0)],
         )
 
     def test_extracts_volume_series_and_download_links(self):
@@ -108,6 +126,11 @@ class ParserTests(unittest.TestCase):
                 ("Volume 1", "Fan translation"),
             ],
         )
+
+    def test_normalizes_zero_padded_volume_numbers(self):
+        self.assertEqual(server.normalize_volume_number("01"), "1")
+        self.assertEqual(server.normalize_volume_number("008"), "8")
+        self.assertEqual(server.normalize_volume_number("08.5"), "8.5")
 
 
 class DatabaseTests(unittest.TestCase):
