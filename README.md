@@ -56,6 +56,11 @@ retried individually or the full pending backlog can be repaired.
 Only metadata and URLs are cached; EPUB files and cover images are not
 downloaded.
 
+Sync progress is checkpointed locally. Completed search pages are saved
+immediately, and if the server stops unexpectedly it finishes the queued entry
+and series details automatically on the next launch. Because remote search
+pages can shift, an interrupted search itself may still need to be run again.
+
 ## Test
 
 ```powershell

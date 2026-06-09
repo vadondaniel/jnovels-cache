@@ -80,6 +80,29 @@ SPECIAL_VOLUME_LABELS_HTML = """
 </article>
 """
 
+NAMED_RELEASES_HTML = """
+<article>
+  <div class="post-content clear">
+    <ol>
+      <li>D-Genesis Side Stories <a href="https://files.example/side-stories">DOWNLOAD</a></li>
+      <li>Disc EX Epub <a href="https://files.example/disc-ex">DOWNLOAD</a></li>
+      <li>Outbreak Company Gaiden <a href="https://files.example/gaiden">DOWNLOAD</a></li>
+      <li>After Story <a href="https://files.example/after-story">DOWNLOAD</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+STANDALONE_VOLUME_LINKS_HTML = """
+<article>
+  <div class="post-content clear">
+    <p><a href="https://files.example/one">VOLUME 01 Epub</a></p>
+    <p><a href="https://files.example/year-two-ten">YEAR 2 VOLUME 10</a></p>
+    <p><a href="https://files.example/part-five-point-five">PART 5 VOL. 4.5</a></p>
+  </div>
+</article>
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_parses_long_volume_title_into_series_and_volume_label(self):
@@ -191,6 +214,31 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(
             [volume.label for volume in parser.details().volumes],
             ["Volume 14", "Volume 14+", "Volume 14++"],
+        )
+
+    def test_extracts_standalone_and_prefixed_volume_links(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(STANDALONE_VOLUME_LINKS_HTML)
+
+        details = parser.details()
+        self.assertEqual(
+            [volume.label for volume in details.volumes],
+            ["Volume 1", "Year 2 Volume 10", "Part 5 Volume 4.5"],
+        )
+        self.assertEqual(details.download_url, "https://files.example/one")
+
+    def test_recognizes_decimal_and_prefixed_volume_labels(self):
+        self.assertTrue(server.is_volume_label("VOLUME 04.5"))
+        self.assertTrue(server.is_volume_label("YEAR 2 VOLUME 10"))
+        self.assertTrue(server.is_volume_label("Vol. 12.5"))
+
+    def test_extracts_named_catalog_releases(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(NAMED_RELEASES_HTML)
+
+        self.assertEqual(
+            [volume.label for volume in parser.details().volumes],
+            ["Side Stories", "Disc Ex", "Gaiden", "After Story"],
         )
 
     def test_normalizes_zero_padded_volume_numbers(self):
@@ -347,6 +395,45 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["published_at"], "2026-06-09")
         self.assertEqual(saved["post_url"], volume.url)
 
+    def test_series_refresh_reconciles_unresolved_child_download(self):
+        series_url = "https://example/series"
+        volume = server.Book(
+            "Example Part 5 Volume 2 Epub",
+            "https://example/volume-2",
+            None,
+            "2026-06-09",
+        )
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series_url, None),
+        )
+        server.record_detail_failure(volume.url, ValueError("missing download"))
+
+        server.upsert_books([server.Book("Example Series", series_url, None, None)])
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume(
+                        "Part 5 Volume 2",
+                        "https://files.example/part-5-v2",
+                        0,
+                    )
+                ],
+            ),
+        )
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertEqual(
+            saved[volume.url]["download_url"],
+            "https://files.example/part-5-v2",
+        )
+        self.assertEqual(server.list_repair_failures(), [])
+
     def test_finds_only_entries_with_incomplete_details(self):
         pending = server.Book("Pending", "https://example/pending", None, None)
         complete = server.Book("Complete", "https://example/complete", None, None)
@@ -357,6 +444,17 @@ class DatabaseTests(unittest.TestCase):
         )
 
         self.assertEqual(server.get_incomplete_detail_urls(10), [pending.url])
+
+    def test_series_with_download_but_no_catalog_is_complete(self):
+        book = server.Book("Standalone Novel", "https://example/standalone", None, None)
+        server.upsert_books([book])
+        server.update_book_details(
+            book.url,
+            server.PostDetails("series", None, "https://files.example/standalone"),
+        )
+
+        self.assertEqual(server.get_incomplete_detail_urls(10), [])
+        self.assertEqual(server.get_cache_health()["pending_details"], 0)
 
     def test_pauses_automatic_repair_after_repeated_failures(self):
         pending = server.Book("Pending", "https://example/pending", None, None)
@@ -541,6 +639,67 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(server.sync_state["series_completed"], 1)
         self.assertEqual(server.sync_state["series_errors"], 0)
 
+    def test_interrupted_sync_recovers_fetched_page_details(self):
+        book_url = "https://jnovels.com/interrupted-volume-1-epub/"
+        search_book = server.Book(
+            "Interrupted Volume 1 Epub",
+            book_url,
+            None,
+            "2026-06-09",
+        )
+        recovered_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/interrupted-v1",
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/interrupted-v1",
+                    0,
+                )
+            ],
+        )
+
+        with (
+            patch.object(server, "fetch_page", return_value=[search_book]),
+            patch.object(
+                server,
+                "fetch_post_details",
+                side_effect=KeyboardInterrupt,
+            ),
+            patch.object(server.time, "sleep"),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            server.run_sync(1, 1, 0.5, "catchup")
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertIn(book_url, saved)
+        checkpoint = server.load_sync_checkpoint()
+        self.assertIsNotNone(checkpoint)
+        self.assertEqual(checkpoint["pending_detail_urls"], [book_url])
+
+        with (
+            patch.object(
+                server,
+                "fetch_post_details",
+                return_value=recovered_details,
+            ),
+            patch.object(server.time, "sleep"),
+        ):
+            self.assertTrue(server.recover_interrupted_sync(checkpoint))
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertEqual(
+            saved[book_url]["download_url"],
+            "https://files.example/interrupted-v1",
+        )
+        self.assertIsNone(server.load_sync_checkpoint())
+        self.assertIn("Recovered saved work", server.sync_state["notice"])
+        metadata = server.get_metadata()
+        self.assertIn("last_sync_interrupted_at", metadata)
+        self.assertIn("last_sync_recovered_at", metadata)
+        self.assertNotIn("last_sync_at", metadata)
+
     def test_repair_mode_processes_pending_details_without_searching(self):
         volume_url = "https://jnovels.com/example-volume-2-epub/"
         series_url = "https://jnovels.com/example-light-novel-epub/"
@@ -583,6 +742,24 @@ class SyncTests(unittest.TestCase):
         saved = {book["url"]: book for book in server.list_books("", "title_asc")}
         self.assertEqual(saved[volume_url]["download_url"], "https://files.example/v2")
         self.assertEqual(saved[series_url]["volume_count"], 2)
+
+    def test_unusable_parse_is_recorded_as_a_repair_failure(self):
+        url = "https://jnovels.com/no-download/"
+        server.upsert_books([server.Book("No Download", url, None, None)])
+
+        with (
+            patch.object(
+                server,
+                "fetch_post_details",
+                return_value=server.PostDetails("series", None, None),
+            ),
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5, "repair")
+
+        failure = server.list_repair_failures()[0]
+        self.assertEqual(failure["url"], url)
+        self.assertIn("No download link found", failure["detail_last_error"])
 
     def test_normal_sync_automatically_repairs_a_bounded_backlog(self):
         pending_url = "https://jnovels.com/pending/"

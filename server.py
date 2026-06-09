@@ -18,7 +18,7 @@ from html.parser import HTMLParser
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 
 ROOT = Path(__file__).resolve().parent
@@ -32,6 +32,8 @@ AUTO_REPAIR_LIMIT = 20
 AUTO_REPAIR_MAX_ATTEMPTS = 3
 AUTO_SERIES_REFRESH_LIMIT = 5
 SERIES_STALE_DAYS = 30
+SYNC_CHECKPOINT_KEY = "active_sync"
+EXCLUDED_SEARCH_PATHS = {"/light-novel-epub-jp/"}
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -81,6 +83,7 @@ class PostDetailsParser(HTMLParser):
         self._anchor_parts: list[str] = []
         self._list_items: list[dict[str, Any]] = []
         self._release_group: str | None = None
+        self._volume_urls: set[str] = set()
 
     @staticmethod
     def _classes(attrs: dict[str, str | None]) -> set[str]:
@@ -134,27 +137,30 @@ class PostDetailsParser(HTMLParser):
 
         if not is_external_http_url(href):
             return
-        if self._list_items and "download" in normalized:
+        volume_label = extract_volume_label(text)
+        if self._list_items and ("download" in normalized or volume_label):
             self._list_items[-1]["download_url"] = href
         if not self.download_url and (
-            "download" in normalized or is_volume_label(normalized)
+            "download" in normalized or volume_label
         ):
             self.download_url = href
+        if volume_label and not self._list_items:
+            self._append_volume(volume_label, href)
 
     def _finish_list_item(self, item: dict[str, Any]) -> None:
         download_url = item["download_url"]
         if not download_url:
             return
         text = " ".join("".join(item["parts"]).split())
-        match = re.search(
-            r"\bVOLUME\s+([0-9]+(?:\.[0-9]+)?)(\+*)",
-            text,
-            re.IGNORECASE,
-        )
-        if not match:
+        label = extract_catalog_label(text)
+        if not label:
             return
-        number = normalize_volume_number(match.group(1))
-        label = f"Volume {number}{match.group(2)}"
+        self._append_volume(label, download_url)
+
+    def _append_volume(self, label: str, download_url: str) -> None:
+        if download_url in self._volume_urls:
+            return
+        self._volume_urls.add(download_url)
         self.volumes.append(
             SeriesVolume(
                 label,
@@ -249,6 +255,8 @@ class SearchResultsParser(HTMLParser):
         title = " ".join("".join(self._title_parts).split())
         if not title or not self._url:
             return
+        if urllib.parse.urlparse(self._url).path in EXCLUDED_SEARCH_PATHS:
+            return
 
         raw_date = " ".join("".join(self._date_parts).split())
         self.books.append(
@@ -281,8 +289,38 @@ def is_external_http_url(value: str) -> bool:
 
 
 def is_volume_label(value: str) -> bool:
-    parts = value.strip().split()
-    return len(parts) >= 2 and parts[0] == "volume" and parts[1].isdigit()
+    return extract_volume_label(value) is not None
+
+
+def extract_volume_label(value: str) -> str | None:
+    match = re.search(
+        r"\b(?:(YEAR|PART)\s+([0-9]+)\s+)?"
+        r"(?:VOLUME|VOL\.?)\s*([0-9]+(?:\.[0-9]+)?)(\+*)",
+        value,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    number = normalize_volume_number(match.group(3))
+    suffix = match.group(4)
+    if match.group(1):
+        prefix = match.group(1).title()
+        prefix_number = normalize_volume_number(match.group(2))
+        return f"{prefix} {prefix_number} Volume {number}{suffix}"
+    return f"Volume {number}{suffix}"
+
+
+def extract_named_release_label(value: str) -> str | None:
+    match = re.search(
+        r"\b(SIDE STORIES|DISC EX|GAIDEN|AFTER STORY)\b",
+        value,
+        re.IGNORECASE,
+    )
+    return match.group(1).title() if match else None
+
+
+def extract_catalog_label(value: str) -> str | None:
+    return extract_volume_label(value) or extract_named_release_label(value)
 
 
 def normalize_volume_number(value: str) -> str:
@@ -451,10 +489,41 @@ def set_metadata(key: str, value: str) -> None:
         )
 
 
+def delete_metadata(key: str) -> None:
+    with connect_db() as connection:
+        connection.execute("DELETE FROM metadata WHERE key = ?", (key,))
+
+
 def get_metadata() -> dict[str, str]:
     with connect_db() as connection:
         rows = connection.execute("SELECT key, value FROM metadata").fetchall()
     return {row["key"]: row["value"] for row in rows}
+
+
+def get_public_metadata() -> dict[str, str]:
+    metadata = get_metadata()
+    metadata.pop(SYNC_CHECKPOINT_KEY, None)
+    return metadata
+
+
+def save_sync_checkpoint(checkpoint: dict[str, Any]) -> None:
+    set_metadata(SYNC_CHECKPOINT_KEY, json.dumps(checkpoint, ensure_ascii=False))
+
+
+def load_sync_checkpoint() -> dict[str, Any] | None:
+    raw = get_metadata().get(SYNC_CHECKPOINT_KEY)
+    if not raw:
+        return None
+    try:
+        checkpoint = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        delete_metadata(SYNC_CHECKPOINT_KEY)
+        return None
+    return checkpoint if isinstance(checkpoint, dict) else None
+
+
+def clear_sync_checkpoint() -> None:
+    delete_metadata(SYNC_CHECKPOINT_KEY)
 
 
 def search_url(page: int) -> str:
@@ -525,6 +594,12 @@ def update_book_details(url: str, details: PostDetails) -> None:
         )
     if details.entry_type == "series":
         replace_series_volumes(url, details.volumes)
+        reconcile_series_downloads(url)
+
+
+def validate_post_details(details: PostDetails) -> None:
+    if not details.download_url:
+        raise ValueError("No download link found on the post.")
 
 
 def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None:
@@ -562,6 +637,51 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
         )
 
 
+def reconcile_series_downloads(series_url: str) -> int:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        volume_rows = connection.execute(
+            """
+            SELECT label, download_url
+            FROM series_volumes
+            WHERE series_url = ?
+            ORDER BY position
+            """,
+            (series_url,),
+        ).fetchall()
+        downloads_by_label = {
+            row["label"].casefold(): row["download_url"] for row in volume_rows
+        }
+        unresolved = connection.execute(
+            """
+            SELECT url, title
+            FROM books
+            WHERE original_post_url = ?
+              AND download_url IS NULL
+            """,
+            (series_url,),
+        ).fetchall()
+        updates = []
+        for row in unresolved:
+            label = extract_catalog_label(row["title"])
+            download_url = downloads_by_label.get((label or "").casefold())
+            if download_url:
+                updates.append((download_url, now, now, row["url"]))
+        connection.executemany(
+            """
+            UPDATE books
+            SET download_url = ?,
+                detail_cached_at = ?,
+                detail_attempts = 0,
+                detail_last_attempt_at = ?,
+                detail_last_error = NULL
+            WHERE url = ?
+            """,
+            updates,
+        )
+    return len(updates)
+
+
 def get_cached_urls() -> set[str]:
     with connect_db() as connection:
         rows = connection.execute("SELECT url FROM books").fetchall()
@@ -594,15 +714,7 @@ def get_incomplete_detail_urls(
         (
             b.detail_cached_at IS NULL
             OR b.entry_type IS NULL
-            OR (b.entry_type = 'volume' AND b.download_url IS NULL)
-            OR (
-                b.entry_type = 'series'
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM series_volumes AS sv
-                    WHERE sv.series_url = b.url
-                )
-            )
+            OR b.download_url IS NULL
         )
         """
     ]
@@ -641,15 +753,7 @@ def get_cache_health() -> dict[str, int]:
             FROM books AS b
             WHERE b.detail_cached_at IS NULL
                OR b.entry_type IS NULL
-               OR (b.entry_type = 'volume' AND b.download_url IS NULL)
-               OR (
-                   b.entry_type = 'series'
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM series_volumes AS sv
-                       WHERE sv.series_url = b.url
-                   )
-               )
+               OR b.download_url IS NULL
             """
         ).fetchone()[0]
         paused = connection.execute(
@@ -659,15 +763,7 @@ def get_cache_health() -> dict[str, int]:
             WHERE (
                     b.detail_cached_at IS NULL
                     OR b.entry_type IS NULL
-                    OR (b.entry_type = 'volume' AND b.download_url IS NULL)
-                    OR (
-                        b.entry_type = 'series'
-                        AND NOT EXISTS (
-                            SELECT 1
-                            FROM series_volumes AS sv
-                            WHERE sv.series_url = b.url
-                        )
-                    )
+                    OR b.download_url IS NULL
                   )
               AND b.detail_attempts >= ?
             """,
@@ -791,6 +887,7 @@ sync_state: dict[str, Any] = {
     "series_total": 0,
     "series_errors": 0,
     "error": None,
+    "notice": None,
     "started_at": None,
     "finished_at": None,
 }
@@ -802,6 +899,7 @@ def collect_sync_books(
     max_pages: int,
     delay: float,
     known_urls: set[str],
+    on_page: Callable[[int, list[Book]], None] | None = None,
 ) -> list[Book]:
     collected: list[Book] = []
     fetched_pages: dict[int, list[Book]] = {}
@@ -812,6 +910,8 @@ def collect_sync_books(
             fetched_pages[page] = fetch_page(page)
             sync_state["pages_completed"] += 1
             sync_state["items_seen"] += len(fetched_pages[page])
+            if on_page:
+                on_page(page, fetched_pages[page])
         return fetched_pages[page]
 
     def add_new(books: list[Book]) -> int:
@@ -912,6 +1012,8 @@ def run_sync(
     delay: float,
     mode: str = "manual",
     detail_urls_override: list[str] | None = None,
+    series_urls_override: list[str] | None = None,
+    recovery: bool = False,
 ) -> None:
     if not sync_lock.acquire(blocking=False):
         return
@@ -934,12 +1036,29 @@ def run_sync(
                 "series_total": 0,
                 "series_errors": 0,
                 "error": None,
+                "notice": None,
                 "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "finished_at": None,
             }
         )
+        checkpoint: dict[str, Any] = {
+            "version": 1,
+            "status": "active",
+            "mode": mode,
+            "start_page": start_page,
+            "max_pages": max_pages,
+            "delay": delay,
+            "phase": "details" if detail_urls_override is not None else "search",
+            "page": start_page,
+            "pages_completed": 0,
+            "pending_detail_urls": list(dict.fromkeys(detail_urls_override or [])),
+            "pending_series_urls": list(dict.fromkeys(series_urls_override or [])),
+            "started_at": sync_state["started_at"],
+            "recovery": recovery,
+        }
+        save_sync_checkpoint(checkpoint)
 
-        scheduled_series_urls: set[str] = set()
+        scheduled_series_urls: set[str] = set(series_urls_override or [])
         if detail_urls_override is not None:
             books = []
             detail_urls = list(dict.fromkeys(detail_urls_override))
@@ -952,8 +1071,23 @@ def run_sync(
             detail_urls = get_incomplete_detail_urls(max_pages)
         else:
             known_urls = get_cached_urls()
-            books = collect_sync_books(mode, start_page, max_pages, delay, known_urls)
-            upsert_books(books)
+
+            def persist_page(page: int, page_books: list[Book]) -> None:
+                upsert_books(page_books)
+                pending = checkpoint["pending_detail_urls"]
+                pending.extend(book.url for book in page_books if book.url not in pending)
+                checkpoint["page"] = page
+                checkpoint["pages_completed"] = sync_state["pages_completed"]
+                save_sync_checkpoint(checkpoint)
+
+            books = collect_sync_books(
+                mode,
+                start_page,
+                max_pages,
+                delay,
+                known_urls,
+                persist_page,
+            )
             detail_urls = list(dict.fromkeys(book.url for book in books))
             detail_urls.extend(
                 get_incomplete_detail_urls(
@@ -967,45 +1101,79 @@ def run_sync(
             )
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
+        checkpoint["phase"] = "details"
+        checkpoint["pending_detail_urls"] = list(dict.fromkeys(detail_urls))
+        checkpoint["pending_series_urls"] = sorted(scheduled_series_urls)
+        save_sync_checkpoint(checkpoint)
         discovered_series_urls: set[str] = set()
-        for url in detail_urls:
+        for index, url in enumerate(detail_urls):
             time.sleep(delay)
+            completed = False
             try:
                 details = fetch_post_details(url)
+                validate_post_details(details)
                 update_book_details(url, details)
                 if details.entry_type == "series":
                     discovered_series_urls.add(url)
                 elif details.original_post_url:
                     discovered_series_urls.add(details.original_post_url)
+                completed = True
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                 record_detail_failure(url, exc)
                 sync_state["detail_errors"] += 1
+                completed = True
             finally:
-                sync_state["details_completed"] += 1
+                if completed:
+                    sync_state["details_completed"] += 1
+                    checkpoint["pending_detail_urls"] = detail_urls[index + 1 :]
+                    checkpoint["pending_series_urls"] = sorted(
+                        scheduled_series_urls | discovered_series_urls
+                    )
+                    save_sync_checkpoint(checkpoint)
 
         missing_series_urls = sorted(
             (discovered_series_urls | scheduled_series_urls) - set(detail_urls)
         )
         sync_state["phase"] = "series"
         sync_state["series_total"] = len(missing_series_urls)
-        for series_url in missing_series_urls:
+        checkpoint["phase"] = "series"
+        checkpoint["pending_detail_urls"] = []
+        checkpoint["pending_series_urls"] = missing_series_urls
+        save_sync_checkpoint(checkpoint)
+        for index, series_url in enumerate(missing_series_urls):
             time.sleep(delay)
+            completed = False
             try:
                 details = fetch_post_details(series_url)
+                validate_post_details(details)
                 update_book_details(series_url, details)
+                completed = True
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                 record_detail_failure(series_url, exc)
                 sync_state["series_errors"] += 1
+                completed = True
             finally:
-                sync_state["series_completed"] += 1
+                if completed:
+                    sync_state["series_completed"] += 1
+                    checkpoint["pending_series_urls"] = missing_series_urls[index + 1 :]
+                    save_sync_checkpoint(checkpoint)
 
         finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["finished_at"] = finished
         sync_state["phase"] = None
-        set_metadata("last_sync_at", finished)
-        set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
-        set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
-        set_metadata("last_series_errors", str(sync_state["series_errors"]))
+        if recovery:
+            sync_state["notice"] = (
+                "Recovered saved work from an interrupted sync; "
+                "the original search may have stopped early."
+            )
+            set_metadata("last_sync_recovered_at", finished)
+        else:
+            set_metadata("last_sync_at", finished)
+            set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
+            set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
+            set_metadata("last_series_errors", str(sync_state["series_errors"]))
+            delete_metadata("last_sync_interrupted_at")
+        clear_sync_checkpoint()
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
         sync_state["error"] = str(exc)
         sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -1013,6 +1181,53 @@ def run_sync(
     finally:
         sync_state["running"] = False
         sync_lock.release()
+
+
+def recover_interrupted_sync(checkpoint: dict[str, Any] | None = None) -> bool:
+    checkpoint = checkpoint or load_sync_checkpoint()
+    if not checkpoint or checkpoint.get("status") != "active":
+        return False
+
+    interrupted_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    set_metadata("last_sync_interrupted_at", interrupted_at)
+    detail_urls = [
+        str(url) for url in checkpoint.get("pending_detail_urls", []) if url
+    ]
+    series_urls = [
+        str(url) for url in checkpoint.get("pending_series_urls", []) if url
+    ]
+    if not detail_urls and not series_urls:
+        clear_sync_checkpoint()
+        sync_state["notice"] = (
+            "The previous sync stopped before more work was queued; "
+            "completed search pages were saved."
+        )
+        return False
+
+    run_sync(
+        1,
+        max(len(detail_urls), 1),
+        min(max(float(checkpoint.get("delay", 1.0)), 0.5), 10.0),
+        "recovery",
+        detail_urls,
+        series_urls,
+        True,
+    )
+    return True
+
+
+def start_interrupted_sync_recovery() -> bool:
+    checkpoint = load_sync_checkpoint()
+    if not checkpoint or checkpoint.get("status") != "active":
+        return False
+    thread = threading.Thread(
+        target=recover_interrupted_sync,
+        args=(checkpoint,),
+        name="jnovels-sync-recovery",
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, ...]]:
@@ -1033,15 +1248,7 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
             (
                 detail_cached_at IS NULL
                 OR entry_type IS NULL
-                OR (entry_type = 'volume' AND download_url IS NULL)
-                OR (
-                    entry_type = 'series'
-                    AND NOT EXISTS (
-                        SELECT 1
-                        FROM series_volumes AS sv
-                        WHERE sv.series_url = books.url
-                    )
-                )
+                OR download_url IS NULL
             )
             """
         )
@@ -1218,7 +1425,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 {
                     "sync": dict(sync_state),
                     "count": count,
-                    "metadata": get_metadata(),
+                    "metadata": get_public_metadata(),
                     "health": get_cache_health(),
                 }
             )
@@ -1330,6 +1537,7 @@ def main() -> None:
 
     initialize_db()
     server = ThreadingHTTPServer((args.host, args.port), AppHandler)
+    start_interrupted_sync_recovery()
     url = f"http://{args.host}:{args.port}"
     print(f"JNovels Cache is running at {url}")
     print("Press Ctrl+C to stop.")

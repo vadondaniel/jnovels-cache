@@ -9,6 +9,7 @@ const state = {
   loadSequence: 0,
   health: {},
   filter: "all",
+  syncNotice: null,
 };
 
 const defaultSort = "published_desc";
@@ -314,6 +315,10 @@ function updateStatus(payload) {
   const sync = payload.sync;
   const health = payload.health || {};
   state.health = health;
+  if (sync.notice && sync.notice !== state.syncNotice) {
+    state.syncNotice = sync.notice;
+    showToast(sync.notice);
+  }
   const lastSync = payload.metadata.last_sync_at;
   elements.lastSync.textContent = lastSync ? `Last synced ${formatDate(lastSync)}` : "Not synced yet";
   elements.syncToggle.disabled = sync.running;
