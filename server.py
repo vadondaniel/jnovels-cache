@@ -619,10 +619,35 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     with connect_db() as connection:
         rows = connection.execute(
             """
-            SELECT label, download_url, position, cached_at
-            FROM series_volumes
-            WHERE series_url = ?
-            ORDER BY position
+            SELECT sv.label,
+                   sv.download_url,
+                   sv.position,
+                   sv.cached_at,
+                   (
+                       SELECT b.published_at
+                       FROM books AS b
+                       WHERE b.download_url = sv.download_url
+                         AND (
+                             b.original_post_url = sv.series_url
+                             OR b.url = sv.series_url
+                         )
+                       ORDER BY (b.entry_type = 'volume') DESC
+                       LIMIT 1
+                   ) AS published_at,
+                   (
+                       SELECT b.url
+                       FROM books AS b
+                       WHERE b.download_url = sv.download_url
+                         AND (
+                             b.original_post_url = sv.series_url
+                             OR b.url = sv.series_url
+                         )
+                       ORDER BY (b.entry_type = 'volume') DESC
+                       LIMIT 1
+                   ) AS post_url
+            FROM series_volumes AS sv
+            WHERE sv.series_url = ?
+            ORDER BY sv.position
             """,
             (series_url,),
         ).fetchall()

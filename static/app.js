@@ -35,6 +35,10 @@ function formatDate(value, options = { year: "numeric", month: "short", day: "nu
   return new Intl.DateTimeFormat(undefined, options).format(date);
 }
 
+function displayTitle(value) {
+  return value.replace(/\s+Epub$/i, "");
+}
+
 function showToast(message, isError = false) {
   elements.toast.textContent = message;
   elements.toast.classList.toggle("is-error", isError);
@@ -67,9 +71,8 @@ function renderBooks(books) {
 
     coverLink.href = book.url;
     titleLink.href = book.url;
-    titleLink.textContent = book.title;
+    titleLink.textContent = displayTitle(book.title);
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
-    card.querySelector(".book-card__cached").textContent = `Cached ${formatDate(book.cached_at)}`;
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
 
     type.textContent = book.entry_type === "volume" ? "Volume" : book.entry_type === "series" ? "Series" : "Not indexed";
@@ -128,15 +131,22 @@ async function openCatalog(book) {
     const fragment = document.createDocumentFragment();
     payload.volumes.forEach((volume) => {
       const link = document.createElement("a");
-      const label = document.createElement("span");
+      const text = document.createElement("span");
+      const label = document.createElement("strong");
+      const date = document.createElement("small");
       const arrow = document.createElement("span");
       link.href = volume.download_url;
       link.target = "_blank";
       link.rel = "noopener";
       label.textContent = volume.label;
+      date.textContent = volume.published_at
+        ? `Released ${formatDate(volume.published_at)}`
+        : "Release date not cached";
+      date.classList.toggle("is-known", Boolean(volume.published_at));
       arrow.textContent = "↗";
       arrow.setAttribute("aria-hidden", "true");
-      link.append(label, arrow);
+      text.append(label, date);
+      link.append(text, arrow);
       fragment.append(link);
     });
     elements.catalogList.append(fragment);

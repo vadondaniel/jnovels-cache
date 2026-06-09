@@ -158,6 +158,29 @@ class DatabaseTests(unittest.TestCase):
             ["Volume 01", "Volume 02"],
         )
 
+    def test_series_catalog_includes_dates_for_cached_volume_posts(self):
+        series_url = "https://example/series"
+        download_url = "https://files.example/v2"
+        volume = server.Book(
+            "Example Volume 2 Epub",
+            "https://example/volume-2",
+            None,
+            "2026-06-09",
+        )
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series_url, download_url),
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 02", download_url, 0)],
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+        self.assertEqual(saved["published_at"], "2026-06-09")
+        self.assertEqual(saved["post_url"], volume.url)
+
 
 class SyncTests(unittest.TestCase):
     def setUp(self):

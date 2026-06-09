@@ -28,7 +28,8 @@ Cards can expose three actions:
 - **Download** opens the external download URL found in the post.
 - **Series** opens the original/main series post for standalone volume entries.
 - **Catalog** opens a separate local dialog containing every cached volume
-  download for that series.
+  download for that series. When the corresponding standalone volume post is
+  cached, the catalog also shows its publication date.
 - **Post** opens the specific JNovels post represented by the cached card.
 
 The crawler makes requests sequentially and enforces a minimum delay of 0.5
