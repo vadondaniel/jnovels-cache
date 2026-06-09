@@ -15,6 +15,7 @@ const elements = {
   grid: document.querySelector("#book-grid"),
   count: document.querySelector("#result-count"),
   lastSync: document.querySelector("#last-sync"),
+  cacheHealth: document.querySelector("#cache-health"),
   syncStatus: document.querySelector("#sync-status"),
   syncToggle: document.querySelector("#sync-toggle"),
   syncDialog: document.querySelector("#sync-dialog"),
@@ -262,10 +263,16 @@ async function loadBooks({ scroll = false } = {}) {
 
 function updateStatus(payload) {
   const sync = payload.sync;
+  const health = payload.health || {};
   const lastSync = payload.metadata.last_sync_at;
   elements.lastSync.textContent = lastSync ? `Last synced ${formatDate(lastSync)}` : "Not synced yet";
   elements.syncToggle.disabled = sync.running;
   elements.syncToggle.classList.toggle("is-running", sync.running);
+  elements.cacheHealth.hidden = sync.running || !health.pending_details;
+  elements.cacheHealth.textContent = `${health.pending_details || 0} details pending`;
+  elements.cacheHealth.title = health.paused_retries
+    ? `${health.paused_retries} entries paused after repeated failures. Open repair options.`
+    : "Open repair options";
 
   if (sync.running) {
     if (sync.phase === "series") {
@@ -350,6 +357,11 @@ function openSyncOptions() {
 }
 
 elements.syncToggle.addEventListener("click", openSyncOptions);
+elements.cacheHealth.addEventListener("click", () => {
+  elements.syncMode.value = "repair";
+  updateSyncMode();
+  openSyncOptions();
+});
 elements.syncClose.addEventListener("click", () => elements.syncDialog.close());
 elements.syncCancel.addEventListener("click", () => elements.syncDialog.close());
 elements.syncDialog.addEventListener("click", (event) => {

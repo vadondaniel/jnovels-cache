@@ -28,6 +28,8 @@ BASE_URL = "https://jnovels.com"
 USER_AGENT = "JNovelsCache/1.0 (+local personal metadata cache)"
 DEFAULT_PAGE_SIZE = 24
 MAX_PAGE_SIZE = 100
+AUTO_REPAIR_LIMIT = 20
+AUTO_REPAIR_MAX_ATTEMPTS = 3
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -349,7 +351,10 @@ def initialize_db() -> None:
                 entry_type TEXT,
                 original_post_url TEXT,
                 download_url TEXT,
-                detail_cached_at TEXT
+                detail_cached_at TEXT,
+                detail_attempts INTEGER NOT NULL DEFAULT 0,
+                detail_last_attempt_at TEXT,
+                detail_last_error TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
@@ -383,6 +388,9 @@ def initialize_db() -> None:
             "original_post_url": "ALTER TABLE books ADD COLUMN original_post_url TEXT",
             "download_url": "ALTER TABLE books ADD COLUMN download_url TEXT",
             "detail_cached_at": "ALTER TABLE books ADD COLUMN detail_cached_at TEXT",
+            "detail_attempts": "ALTER TABLE books ADD COLUMN detail_attempts INTEGER NOT NULL DEFAULT 0",
+            "detail_last_attempt_at": "ALTER TABLE books ADD COLUMN detail_last_attempt_at TEXT",
+            "detail_last_error": "ALTER TABLE books ADD COLUMN detail_last_error TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -487,13 +495,17 @@ def update_book_details(url: str, details: PostDetails) -> None:
             SET entry_type = ?,
                 original_post_url = ?,
                 download_url = ?,
-                detail_cached_at = ?
+                detail_cached_at = ?,
+                detail_attempts = 0,
+                detail_last_attempt_at = ?,
+                detail_last_error = NULL
             WHERE url = ?
             """,
             (
                 details.entry_type,
                 details.original_post_url,
                 details.download_url,
+                now,
                 now,
                 url,
             ),
@@ -535,11 +547,76 @@ def get_cached_urls() -> set[str]:
     return {row["url"] for row in rows}
 
 
-def get_incomplete_detail_urls(limit: int) -> list[str]:
+def record_detail_failure(url: str, error: Exception) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            UPDATE books
+            SET detail_attempts = detail_attempts + 1,
+                detail_last_attempt_at = ?,
+                detail_last_error = ?
+            WHERE url = ?
+            """,
+            (now, str(error)[:500], url),
+        )
+
+
+def get_incomplete_detail_urls(
+    limit: int,
+    *,
+    max_attempts: int | None = None,
+    exclude_urls: set[str] | None = None,
+) -> list[str]:
+    conditions = [
+        """
+        (
+            b.detail_cached_at IS NULL
+            OR b.entry_type IS NULL
+            OR (b.entry_type = 'volume' AND b.download_url IS NULL)
+            OR (
+                b.entry_type = 'series'
+                AND NOT EXISTS (
+                    SELECT 1
+                    FROM series_volumes AS sv
+                    WHERE sv.series_url = b.url
+                )
+            )
+        )
+        """
+    ]
+    params: list[Any] = []
+    if max_attempts is not None:
+        conditions.append("b.detail_attempts < ?")
+        params.append(max_attempts)
+    if exclude_urls:
+        placeholders = ", ".join("?" for _ in exclude_urls)
+        conditions.append(f"b.url NOT IN ({placeholders})")
+        params.extend(sorted(exclude_urls))
+    params.append(limit)
+
     with connect_db() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT b.url
+            FROM books AS b
+            WHERE {" AND ".join(conditions)}
+            ORDER BY b.detail_last_attempt_at IS NOT NULL,
+                     b.detail_last_attempt_at,
+                     b.published_at DESC,
+                     b.id DESC
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [row["url"] for row in rows]
+
+
+def get_cache_health() -> dict[str, int]:
+    with connect_db() as connection:
+        pending = connection.execute(
+            """
+            SELECT COUNT(*)
             FROM books AS b
             WHERE b.detail_cached_at IS NULL
                OR b.entry_type IS NULL
@@ -552,12 +629,30 @@ def get_incomplete_detail_urls(limit: int) -> list[str]:
                        WHERE sv.series_url = b.url
                    )
                )
-            ORDER BY b.published_at DESC, b.id DESC
-            LIMIT ?
+            """
+        ).fetchone()[0]
+        paused = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM books AS b
+            WHERE (
+                    b.detail_cached_at IS NULL
+                    OR b.entry_type IS NULL
+                    OR (b.entry_type = 'volume' AND b.download_url IS NULL)
+                    OR (
+                        b.entry_type = 'series'
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM series_volumes AS sv
+                            WHERE sv.series_url = b.url
+                        )
+                    )
+                  )
+              AND b.detail_attempts >= ?
             """,
-            (limit,),
-        ).fetchall()
-    return [row["url"] for row in rows]
+            (AUTO_REPAIR_MAX_ATTEMPTS,),
+        ).fetchone()[0]
+    return {"pending_details": pending, "paused_retries": paused}
 
 
 sync_lock = threading.Lock()
@@ -732,6 +827,13 @@ def run_sync(
             books = collect_sync_books(mode, start_page, max_pages, delay, known_urls)
             upsert_books(books)
             detail_urls = list(dict.fromkeys(book.url for book in books))
+            detail_urls.extend(
+                get_incomplete_detail_urls(
+                    AUTO_REPAIR_LIMIT,
+                    max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
+                    exclude_urls=set(detail_urls),
+                )
+            )
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
         discovered_series_urls: set[str] = set()
@@ -744,7 +846,8 @@ def run_sync(
                     discovered_series_urls.add(url)
                 elif details.original_post_url:
                     discovered_series_urls.add(details.original_post_url)
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                record_detail_failure(url, exc)
                 sync_state["detail_errors"] += 1
             finally:
                 sync_state["details_completed"] += 1
@@ -757,7 +860,8 @@ def run_sync(
             try:
                 details = fetch_post_details(series_url)
                 update_book_details(series_url, details)
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+                record_detail_failure(series_url, exc)
                 sync_state["series_errors"] += 1
             finally:
                 sync_state["series_completed"] += 1
@@ -938,7 +1042,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             with connect_db() as connection:
                 count = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
             self.send_json(
-                {"sync": dict(sync_state), "count": count, "metadata": get_metadata()}
+                {
+                    "sync": dict(sync_state),
+                    "count": count,
+                    "metadata": get_metadata(),
+                    "health": get_cache_health(),
+                }
             )
             return
         if parsed.path == "/api/series":

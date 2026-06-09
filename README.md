@@ -27,7 +27,8 @@ The app opens at <http://127.0.0.1:8765>.
      or volume-list metadata was not completed by an earlier sync.
    - **Scan a page range** checks an explicit starting page and page count.
 3. Select **Start sync**. The app scans search pages, then visits each result
-   post to identify its entry type and associated links.
+   post to identify its entry type and associated links. Normal syncs also
+   retry a small number of older incomplete entries automatically.
 4. Search and sort the cached results without waiting for JNovels search pages.
    Results are shown 24 at a time; use the page field to jump directly to any
    result page.
@@ -45,6 +46,8 @@ Cards can expose three actions:
 
 The crawler makes requests sequentially and enforces a minimum delay of 0.5
 seconds. Re-running a sync updates existing records instead of duplicating them.
+Repeated detail failures are paused after three automatic attempts; the
+**details pending** indicator opens the manual repair mode.
 Only metadata and URLs are cached; EPUB files and cover images are not
 downloaded.
 

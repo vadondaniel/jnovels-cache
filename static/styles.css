@@ -230,6 +230,31 @@ kbd {
 .status-row span { color: var(--muted); font-size: .78rem; }
 .sync-status { color: var(--muted); font-size: .8rem; }
 
+.status-row__activity {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.cache-health {
+  padding: 5px 9px;
+  color: #765815;
+  background: rgba(215, 173, 75, .12);
+  border: 1px solid rgba(139, 104, 29, .24);
+  border-radius: 999px;
+  cursor: pointer;
+  font-size: .72rem;
+  font-weight: 750;
+}
+
+.cache-health:hover {
+  color: var(--ink);
+  border-color: var(--gold);
+}
+
+.cache-health[hidden] { display: none; }
+
 .sync-status.is-running::before {
   display: inline-block;
   width: 8px;
@@ -825,6 +850,7 @@ kbd {
   .sync-dialog__header, .sync-dialog__form { padding-right: 20px; padding-left: 20px; }
   .sync-dialog__actions .button { flex: 1; }
   .status-row { align-items: flex-start; gap: 8px; padding: 20px 0; flex-direction: column; }
+  .status-row__activity { justify-content: flex-start; flex-wrap: wrap; }
   .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; padding-top: 18px; }
   .book-card__body { min-height: 135px; padding: 13px; }
   .book-card h2 { font-size: .91rem; }

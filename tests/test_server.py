@@ -265,6 +265,42 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(server.get_incomplete_detail_urls(10), [pending.url])
 
+    def test_pauses_automatic_repair_after_repeated_failures(self):
+        pending = server.Book("Pending", "https://example/pending", None, None)
+        server.upsert_books([pending])
+
+        for _ in range(server.AUTO_REPAIR_MAX_ATTEMPTS):
+            server.record_detail_failure(pending.url, ValueError("broken post"))
+
+        self.assertEqual(
+            server.get_incomplete_detail_urls(
+                10,
+                max_attempts=server.AUTO_REPAIR_MAX_ATTEMPTS,
+            ),
+            [],
+        )
+        self.assertEqual(server.get_incomplete_detail_urls(10), [pending.url])
+        self.assertEqual(
+            server.get_cache_health(),
+            {"pending_details": 1, "paused_retries": 1},
+        )
+
+        server.update_book_details(
+            pending.url,
+            server.PostDetails("volume", "https://example/series", "https://files/pending"),
+        )
+        with server.connect_db() as connection:
+            row = connection.execute(
+                """
+                SELECT detail_attempts, detail_last_error
+                FROM books
+                WHERE url = ?
+                """,
+                (pending.url,),
+            ).fetchone()
+        self.assertEqual(row["detail_attempts"], 0)
+        self.assertIsNone(row["detail_last_error"])
+
 
 class SyncTests(unittest.TestCase):
     def setUp(self):
@@ -361,6 +397,34 @@ class SyncTests(unittest.TestCase):
         saved = {book["url"]: book for book in server.list_books("", "title_asc")}
         self.assertEqual(saved[volume_url]["download_url"], "https://files.example/v2")
         self.assertEqual(saved[series_url]["volume_count"], 2)
+
+    def test_normal_sync_automatically_repairs_a_bounded_backlog(self):
+        pending_url = "https://jnovels.com/pending/"
+        new_url = "https://jnovels.com/new/"
+        server.upsert_books([server.Book("Pending", pending_url, None, "2026-01-01")])
+        details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        with (
+            patch.object(
+                server,
+                "fetch_page",
+                return_value=[server.Book("New", new_url, None, "2026-06-09")],
+            ),
+            patch.object(server, "fetch_post_details", return_value=details) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5, "catchup")
+
+        self.assertEqual(
+            fetch_details.call_args_list,
+            [call(new_url), call(pending_url)],
+        )
+        self.assertEqual(server.get_cache_health()["pending_details"], 0)
 
     def test_catchup_stops_on_first_page_overlapping_cache(self):
         known_url = "https://jnovels.com/known/"
