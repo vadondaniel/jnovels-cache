@@ -146,16 +146,6 @@ button, a { -webkit-tap-highlight-color: transparent; }
   font-size: 1rem;
 }
 
-kbd {
-  padding: 3px 7px;
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 4px;
-  color: #8b8475;
-  background: var(--surface);
-  font: .72rem ui-monospace, monospace;
-}
-
 .controls {
   display: grid;
   grid-template-columns: 220px auto;

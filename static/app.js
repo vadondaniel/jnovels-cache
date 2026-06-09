@@ -606,13 +606,6 @@ window.addEventListener("popstate", () => {
   loadBooks().catch((error) => showToast(error.message, true));
 });
 
-document.addEventListener("keydown", (event) => {
-  if (event.key === "/" && !["INPUT", "SELECT", "TEXTAREA"].includes(document.activeElement.tagName)) {
-    event.preventDefault();
-    elements.search.focus();
-  }
-});
-
 applyViewFromUrl();
 updateSyncMode();
 Promise.all([loadBooks({ historyMode: "replace" }), loadStatus()])
