@@ -23,6 +23,8 @@ The app opens at <http://127.0.0.1:8765>.
      already-cached results.
    - **Add older entries** estimates the current cached frontier and adds the
      requested number of older uncached pages.
+   - **Repair missing details** revisits cached entries whose download, series,
+     or volume-list metadata was not completed by an earlier sync.
    - **Scan a page range** checks an explicit starting page and page count.
 3. Select **Start sync**. The app scans search pages, then visits each result
    post to identify its entry type and associated links.

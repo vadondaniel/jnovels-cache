@@ -254,6 +254,17 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["published_at"], "2026-06-09")
         self.assertEqual(saved["post_url"], volume.url)
 
+    def test_finds_only_entries_with_incomplete_details(self):
+        pending = server.Book("Pending", "https://example/pending", None, None)
+        complete = server.Book("Complete", "https://example/complete", None, None)
+        server.upsert_books([pending, complete])
+        server.update_book_details(
+            complete.url,
+            server.PostDetails("volume", "https://example/series", "https://files/complete"),
+        )
+
+        self.assertEqual(server.get_incomplete_detail_urls(10), [pending.url])
+
 
 class SyncTests(unittest.TestCase):
     def setUp(self):
@@ -307,6 +318,49 @@ class SyncTests(unittest.TestCase):
         )
         self.assertEqual(server.sync_state["series_completed"], 1)
         self.assertEqual(server.sync_state["series_errors"], 0)
+
+    def test_repair_mode_processes_pending_details_without_searching(self):
+        volume_url = "https://jnovels.com/example-volume-2-epub/"
+        series_url = "https://jnovels.com/example-light-novel-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Volume 2 Epub", volume_url, None, "2026-06-09"),
+                server.Book("Example Light Novel Epub", series_url, None, "2026-06-01"),
+            ]
+        )
+        volume_details = server.PostDetails(
+            "volume",
+            series_url,
+            "https://files.example/v2",
+        )
+        series_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+            ],
+        )
+
+        def fake_details(url):
+            return volume_details if url == volume_url else series_details
+
+        with (
+            patch.object(server, "fetch_page") as fetch_page,
+            patch.object(server, "fetch_post_details", side_effect=fake_details) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 10, 0.5, "repair")
+
+        fetch_page.assert_not_called()
+        self.assertEqual(
+            fetch_details.call_args_list,
+            [call(volume_url), call(series_url)],
+        )
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertEqual(saved[volume_url]["download_url"], "https://files.example/v2")
+        self.assertEqual(saved[series_url]["volume_count"], 2)
 
     def test_catchup_stops_on_first_page_overlapping_cache(self):
         known_url = "https://jnovels.com/known/"

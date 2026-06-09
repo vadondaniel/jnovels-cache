@@ -300,16 +300,25 @@ function updateSyncMode() {
   if (mode === "catchup") {
     elements.maxPagesLabel.textContent = "Page limit";
     elements.maxPages.value = "20";
+    elements.maxPages.max = "200";
     elements.syncHelp.textContent =
       "Checks newest entries first and stops after reaching entries already in the cache.";
   } else if (mode === "extend") {
     elements.maxPagesLabel.textContent = "Pages to add";
     elements.maxPages.value = "10";
+    elements.maxPages.max = "200";
     elements.syncHelp.textContent =
       "Finds the oldest cached search page, then adds the next older pages.";
+  } else if (mode === "repair") {
+    elements.maxPagesLabel.textContent = "Entry limit";
+    elements.maxPages.value = "1000";
+    elements.maxPages.max = "2000";
+    elements.syncHelp.textContent =
+      "Rechecks cached entries with missing details, then refreshes any linked series pages.";
   } else {
     elements.maxPagesLabel.textContent = "Pages to scan";
     elements.maxPages.value = "6";
+    elements.maxPages.max = "200";
     elements.syncHelp.textContent =
       "Checks an exact page range, including entries already in the cache.";
   }

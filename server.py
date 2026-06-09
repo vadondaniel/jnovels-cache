@@ -535,6 +535,31 @@ def get_cached_urls() -> set[str]:
     return {row["url"] for row in rows}
 
 
+def get_incomplete_detail_urls(limit: int) -> list[str]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT b.url
+            FROM books AS b
+            WHERE b.detail_cached_at IS NULL
+               OR b.entry_type IS NULL
+               OR (b.entry_type = 'volume' AND b.download_url IS NULL)
+               OR (
+                   b.entry_type = 'series'
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM series_volumes AS sv
+                       WHERE sv.series_url = b.url
+                   )
+               )
+            ORDER BY b.published_at DESC, b.id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [row["url"] for row in rows]
+
+
 sync_lock = threading.Lock()
 sync_state: dict[str, Any] = {
     "running": False,
@@ -699,10 +724,14 @@ def run_sync(
             }
         )
 
-        known_urls = get_cached_urls()
-        books = collect_sync_books(mode, start_page, max_pages, delay, known_urls)
-        upsert_books(books)
-        detail_urls = list(dict.fromkeys(book.url for book in books))
+        if mode == "repair":
+            books: list[Book] = []
+            detail_urls = get_incomplete_detail_urls(max_pages)
+        else:
+            known_urls = get_cached_urls()
+            books = collect_sync_books(mode, start_page, max_pages, delay, known_urls)
+            upsert_books(books)
+            detail_urls = list(dict.fromkeys(book.url for book in books))
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
         discovered_series_urls: set[str] = set()
@@ -727,7 +756,7 @@ def run_sync(
             time.sleep(delay)
             try:
                 details = fetch_post_details(series_url)
-                replace_series_volumes(series_url, details.volumes)
+                update_book_details(series_url, details)
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 sync_state["series_errors"] += 1
             finally:
@@ -943,10 +972,11 @@ class AppHandler(SimpleHTTPRequestHandler):
         try:
             payload = self.read_json()
             mode = str(payload.get("mode", "catchup")).strip().casefold()
-            if mode not in {"catchup", "extend", "manual"}:
+            if mode not in {"catchup", "extend", "manual", "repair"}:
                 raise ValueError("Unknown sync mode")
             start_page = min(max(int(payload.get("start_page", 1)), 1), 10000)
-            max_pages = min(max(int(payload.get("max_pages", 20)), 1), 200)
+            max_limit = 2000 if mode == "repair" else 200
+            max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
             delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
         except (ValueError, TypeError, json.JSONDecodeError):
             self.send_json({"error": "Invalid sync options."}, HTTPStatus.BAD_REQUEST)
