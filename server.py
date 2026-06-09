@@ -652,7 +652,43 @@ def get_cache_health() -> dict[str, int]:
             """,
             (AUTO_REPAIR_MAX_ATTEMPTS,),
         ).fetchone()[0]
-    return {"pending_details": pending, "paused_retries": paused}
+        failed = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM books
+            WHERE detail_attempts > 0
+              AND detail_last_error IS NOT NULL
+            """
+        ).fetchone()[0]
+    return {
+        "pending_details": pending,
+        "failed_retries": failed,
+        "paused_retries": paused,
+    }
+
+
+def list_repair_failures(limit: int = 100) -> list[dict[str, Any]]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT title, url, detail_attempts, detail_last_attempt_at, detail_last_error
+            FROM books
+            WHERE detail_attempts > 0
+              AND detail_last_error IS NOT NULL
+            ORDER BY detail_last_attempt_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def is_cached_book_url(url: str) -> bool:
+    with connect_db() as connection:
+        return connection.execute(
+            "SELECT 1 FROM books WHERE url = ?",
+            (url,),
+        ).fetchone() is not None
 
 
 sync_lock = threading.Lock()
@@ -792,6 +828,7 @@ def run_sync(
     max_pages: int,
     delay: float,
     mode: str = "manual",
+    detail_urls_override: list[str] | None = None,
 ) -> None:
     if not sync_lock.acquire(blocking=False):
         return
@@ -819,7 +856,10 @@ def run_sync(
             }
         )
 
-        if mode == "repair":
+        if detail_urls_override is not None:
+            books = []
+            detail_urls = list(dict.fromkeys(detail_urls_override))
+        elif mode == "repair":
             books: list[Book] = []
             detail_urls = get_incomplete_detail_urls(max_pages)
         else:
@@ -1050,6 +1090,10 @@ class AppHandler(SimpleHTTPRequestHandler):
                 }
             )
             return
+        if parsed.path == "/api/repair-failures":
+            failures = list_repair_failures()
+            self.send_json({"failures": failures, "count": len(failures)})
+            return
         if parsed.path == "/api/series":
             params = urllib.parse.parse_qs(parsed.query)
             series_url = params.get("url", [""])[0].strip()
@@ -1071,7 +1115,7 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path != "/api/sync":
+        if parsed.path not in {"/api/sync", "/api/repair-entry"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         if sync_state["running"]:
@@ -1080,6 +1124,25 @@ class AppHandler(SimpleHTTPRequestHandler):
 
         try:
             payload = self.read_json()
+            if parsed.path == "/api/repair-entry":
+                url = str(payload.get("url", "")).strip()
+                delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
+                if not url or not is_cached_book_url(url):
+                    self.send_json(
+                        {"error": "Cached entry not found."},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                thread = threading.Thread(
+                    target=run_sync,
+                    args=(1, 1, delay, "repair", [url]),
+                    name="jnovels-repair-entry",
+                    daemon=True,
+                )
+                thread.start()
+                self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+                return
+
             mode = str(payload.get("mode", "catchup")).strip().casefold()
             if mode not in {"catchup", "extend", "manual", "repair"}:
                 raise ValueError("Unknown sync mode")

@@ -282,8 +282,17 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(server.get_incomplete_detail_urls(10), [pending.url])
         self.assertEqual(
             server.get_cache_health(),
-            {"pending_details": 1, "paused_retries": 1},
+            {
+                "pending_details": 1,
+                "failed_retries": 1,
+                "paused_retries": 1,
+            },
         )
+        failures = server.list_repair_failures()
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(failures[0]["url"], pending.url)
+        self.assertEqual(failures[0]["detail_attempts"], 3)
+        self.assertEqual(failures[0]["detail_last_error"], "broken post")
 
         server.update_book_details(
             pending.url,
@@ -425,6 +434,33 @@ class SyncTests(unittest.TestCase):
             [call(new_url), call(pending_url)],
         )
         self.assertEqual(server.get_cache_health()["pending_details"], 0)
+
+    def test_targeted_repair_only_processes_requested_entry(self):
+        first_url = "https://jnovels.com/first/"
+        second_url = "https://jnovels.com/second/"
+        server.upsert_books(
+            [
+                server.Book("First", first_url, None, None),
+                server.Book("Second", second_url, None, None),
+            ]
+        )
+        details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        with (
+            patch.object(server, "fetch_page") as fetch_page,
+            patch.object(server, "fetch_post_details", return_value=details) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5, "repair", [second_url])
+
+        fetch_page.assert_not_called()
+        fetch_details.assert_called_once_with(second_url)
+        self.assertEqual(server.get_incomplete_detail_urls(10), [first_url])
 
     def test_catchup_stops_on_first_page_overlapping_cache(self):
         known_url = "https://jnovels.com/known/"

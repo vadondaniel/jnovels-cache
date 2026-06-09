@@ -47,7 +47,8 @@ Cards can expose three actions:
 The crawler makes requests sequentially and enforces a minimum delay of 0.5
 seconds. Re-running a sync updates existing records instead of duplicating them.
 Repeated detail failures are paused after three automatic attempts; the
-**details pending** indicator opens the manual repair mode.
+**details pending** indicator opens cache health, where failed entries can be
+retried individually or the full pending backlog can be repaired.
 Only metadata and URLs are cached; EPUB files and cover images are not
 downloaded.
 

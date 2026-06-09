@@ -7,6 +7,7 @@ const state = {
   pages: 1,
   total: 0,
   loadSequence: 0,
+  health: {},
 };
 
 const elements = {
@@ -29,6 +30,11 @@ const elements = {
   maxPages: document.querySelector("#max-pages"),
   delay: document.querySelector("#delay"),
   syncHelp: document.querySelector("#sync-help"),
+  repairDialog: document.querySelector("#repair-dialog"),
+  repairSummary: document.querySelector("#repair-summary"),
+  repairList: document.querySelector("#repair-list"),
+  repairClose: document.querySelector("#repair-close"),
+  repairAll: document.querySelector("#repair-all"),
   empty: document.querySelector("#empty-state"),
   emptyTitle: document.querySelector("#empty-title"),
   emptyText: document.querySelector("#empty-text"),
@@ -264,12 +270,14 @@ async function loadBooks({ scroll = false } = {}) {
 function updateStatus(payload) {
   const sync = payload.sync;
   const health = payload.health || {};
+  state.health = health;
   const lastSync = payload.metadata.last_sync_at;
   elements.lastSync.textContent = lastSync ? `Last synced ${formatDate(lastSync)}` : "Not synced yet";
   elements.syncToggle.disabled = sync.running;
   elements.syncToggle.classList.toggle("is-running", sync.running);
   elements.cacheHealth.hidden = sync.running || !health.pending_details;
-  elements.cacheHealth.textContent = `${health.pending_details || 0} details pending`;
+  const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
+  elements.cacheHealth.textContent = `${health.pending_details || 0} pending${failedText}`;
   elements.cacheHealth.title = health.paused_retries
     ? `${health.paused_retries} entries paused after repeated failures. Open repair options.`
     : "Open repair options";
@@ -357,7 +365,87 @@ function openSyncOptions() {
 }
 
 elements.syncToggle.addEventListener("click", openSyncOptions);
-elements.cacheHealth.addEventListener("click", () => {
+
+async function retryEntry(url) {
+  await request("/api/repair-entry", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url, delay: Number(elements.delay.value) }),
+  });
+  elements.repairDialog.close();
+  showToast("Repair started.");
+  await loadStatus();
+}
+
+async function openRepairStatus() {
+  elements.repairSummary.textContent = "Loading repair status...";
+  elements.repairList.replaceChildren();
+  if (!elements.repairDialog.open) elements.repairDialog.showModal();
+
+  try {
+    const payload = await request("/api/repair-failures");
+    const pending = state.health.pending_details || 0;
+    elements.repairSummary.textContent = payload.count
+      ? `${pending} pending entries · ${payload.count} with recorded failures`
+      : `${pending} entries are waiting for details. No recorded failures.`;
+
+    if (!payload.count) {
+      const empty = document.createElement("p");
+      empty.className = "repair-dialog__empty";
+      empty.textContent = "Automatic repair will continue during normal syncs.";
+      elements.repairList.append(empty);
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    payload.failures.forEach((failure) => {
+      const row = document.createElement("article");
+      const body = document.createElement("div");
+      const title = document.createElement("a");
+      const meta = document.createElement("p");
+      const error = document.createElement("p");
+      const retry = document.createElement("button");
+
+      row.className = "repair-failure";
+      title.href = failure.url;
+      title.target = "_blank";
+      title.rel = "noopener";
+      title.textContent = failure.title;
+      meta.className = "repair-failure__meta";
+      meta.textContent =
+        `${failure.detail_attempts} ${failure.detail_attempts === 1 ? "attempt" : "attempts"} · Last tried ${formatDate(failure.detail_last_attempt_at)}`;
+      error.className = "repair-failure__error";
+      error.textContent = failure.detail_last_error;
+      retry.type = "button";
+      retry.textContent = "Retry";
+      retry.addEventListener("click", async () => {
+        retry.disabled = true;
+        try {
+          await retryEntry(failure.url);
+        } catch (requestError) {
+          retry.disabled = false;
+          showToast(requestError.message, true);
+        }
+      });
+
+      body.append(title, meta, error);
+      row.append(body, retry);
+      fragment.append(row);
+    });
+    elements.repairList.append(fragment);
+  } catch (error) {
+    elements.repairSummary.textContent = "Could not load repair status.";
+    showToast(error.message, true);
+  }
+}
+
+elements.cacheHealth.addEventListener("click", openRepairStatus);
+elements.repairClose.addEventListener("click", () => elements.repairDialog.close());
+elements.repairDialog.addEventListener("click", (event) => {
+  if (event.target === elements.repairDialog) elements.repairDialog.close();
+});
+elements.repairAll.addEventListener("click", () => {
+  elements.repairDialog.close();
   elements.syncMode.value = "repair";
   updateSyncMode();
   openSyncOptions();

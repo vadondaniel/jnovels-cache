@@ -131,6 +131,21 @@
     </form>
   </dialog>
 
+  <dialog id="repair-dialog" class="repair-dialog">
+    <header class="repair-dialog__header">
+      <div>
+        <p class="eyebrow">Cache health</p>
+        <h2>Incomplete details</h2>
+        <p id="repair-summary">Loading repair status...</p>
+      </div>
+      <button id="repair-close" class="repair-dialog__close" type="button" aria-label="Close repair status">×</button>
+    </header>
+    <div id="repair-list" class="repair-dialog__list"></div>
+    <footer class="repair-dialog__footer">
+      <button id="repair-all" class="button button--dark" type="button">Repair pending entries</button>
+    </footer>
+  </dialog>
+
   <template id="book-template">
     <article class="book-card">
       <a class="book-card__cover-link" target="_blank" rel="noopener">
