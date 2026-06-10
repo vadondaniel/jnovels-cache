@@ -151,7 +151,11 @@ function renderBooks(books, total) {
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
 
     type.textContent = book.volume_label
-      || (book.entry_type === "series" ? "Series" : "Details pending");
+      || (book.is_standalone
+        ? "Standalone"
+        : book.entry_type === "series"
+          ? "Series"
+          : "Details pending");
     type.classList.toggle("is-pending", !book.entry_type);
 
     postLink.href = book.url;
@@ -165,14 +169,14 @@ function renderBooks(books, total) {
     } else {
       seriesLink.hidden = true;
     }
-    if (book.volume_count) {
+    if (book.volume_count > 1) {
       catalogButton.textContent = `Volumes · ${book.volume_count}`;
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
     }
     if (
-      !book.volume_count
+      book.volume_count <= 1
       && (book.synopsis || book.associated_names.length || book.genres.length)
     ) {
       detailsButton.addEventListener("click", () => openDetails(book));
@@ -180,7 +184,7 @@ function renderBooks(books, total) {
       detailsButton.hidden = true;
     }
 
-    if (book.entry_type === "series" && book.volume_count) {
+    if (book.entry_type === "series" && book.volume_count > 1) {
       coverLink.href = "#";
       titleLink.href = "#";
       coverLink.setAttribute("aria-label", `Browse cached volumes for ${book.series_title}`);

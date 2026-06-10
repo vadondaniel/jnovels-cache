@@ -72,6 +72,7 @@ class SeriesVolume:
     download_url: str
     position: int
     release_group: str | None = None
+    source_list: int = field(default=0, compare=False, repr=False)
 
 
 class PostDetailsParser(HTMLParser):
@@ -87,6 +88,10 @@ class PostDetailsParser(HTMLParser):
         self._list_items: list[dict[str, Any]] = []
         self._release_group: str | None = None
         self._volume_urls: set[str] = set()
+        self._volume_keys: dict[tuple[int, str, str], int] = {}
+        self._list_depth = 0
+        self._list_index = 0
+        self._current_list_index = 0
         self._description_depth = 0
         self._associated_depth = 0
         self._in_associated_heading = False
@@ -121,11 +126,22 @@ class PostDetailsParser(HTMLParser):
         elif tag == "br" and self._associated_depth:
             self._associated_parts.append("\n")
 
+        if tag in {"ol", "ul"} and self._content_depth:
+            if self._list_depth == 0:
+                self._list_index += 1
+                self._current_list_index = self._list_index
+            self._list_depth += 1
         if tag == "a" and self._content_depth:
             self._anchor_href = attributes.get("href")
             self._anchor_parts = []
         elif tag == "li" and self._content_depth:
-            self._list_items.append({"parts": [], "download_url": None})
+            self._list_items.append(
+                {
+                    "parts": [],
+                    "download_url": None,
+                    "source_list": self._current_list_index,
+                }
+            )
 
     def handle_endtag(self, tag: str) -> None:
         if tag == "a" and self._content_depth and self._anchor_href:
@@ -136,6 +152,10 @@ class PostDetailsParser(HTMLParser):
             self._finish_list_item(self._list_items.pop())
         elif tag in {"h4", "h5", "h6"} and self._in_associated_heading:
             self._in_associated_heading = False
+        elif tag in {"ol", "ul"} and self._content_depth and self._list_depth:
+            self._list_depth -= 1
+            if self._list_depth == 0:
+                self._current_list_index = 0
         elif tag == "p" and self._description_depth and not self._associated_depth:
             self._description_parts.append("\n\n")
         elif tag == "div":
@@ -149,9 +169,15 @@ class PostDetailsParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         normalized = " ".join(data.split()).casefold()
         if self._content_depth and not self._list_items:
-            if re.search(r"\bofficial (?:translation|translated version|version)\b", normalized):
+            if re.search(
+                r"\bofficial (?:translations?|translated versions?|versions?)\b",
+                normalized,
+            ):
                 self._release_group = "Official translation"
-            elif re.search(r"\bfan (?:translation|translated version|version)\b", normalized):
+            elif re.search(
+                r"\bfan (?:translations?|translated versions?|versions?)\b",
+                normalized,
+            ):
                 self._release_group = "Fan translation"
         if self._anchor_href:
             self._anchor_parts.append(data)
@@ -182,6 +208,15 @@ class PostDetailsParser(HTMLParser):
             self._genres.append(genre)
             return
 
+        if (
+            self._list_items
+            and parsed_href.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
+            and parsed_href.path not in {"/", "/faq/"}
+            and "share=" not in parsed_href.query
+        ):
+            self._list_items[-1]["download_url"] = href
+            return
+
         if not is_external_http_url(href):
             return
         catalog_label = extract_catalog_label(text)
@@ -202,18 +237,43 @@ class PostDetailsParser(HTMLParser):
         label = extract_catalog_label(text) or extract_trailing_catalog_label(text)
         if not label:
             return
-        self._append_volume(label, download_url)
+        self._append_volume(label, download_url, item["source_list"])
 
-    def _append_volume(self, label: str, download_url: str) -> None:
+    def _append_volume(
+        self,
+        label: str,
+        download_url: str,
+        source_list: int = 0,
+    ) -> None:
         if download_url in self._volume_urls:
             return
+        key = (
+            source_list,
+            (self._release_group or "").casefold(),
+            label.casefold(),
+        )
+        existing_index = self._volume_keys.get(key)
+        if existing_index is not None:
+            existing = self.volumes[existing_index]
+            self._volume_urls.discard(existing.download_url)
+            self._volume_urls.add(download_url)
+            self.volumes[existing_index] = SeriesVolume(
+                label,
+                download_url,
+                existing.position,
+                self._release_group,
+                source_list,
+            )
+            return
         self._volume_urls.add(download_url)
+        self._volume_keys[key] = len(self.volumes)
         self.volumes.append(
             SeriesVolume(
                 label,
                 download_url,
                 len(self.volumes),
                 self._release_group,
+                source_list,
             )
         )
 
@@ -221,11 +281,21 @@ class PostDetailsParser(HTMLParser):
         entry_type = "volume" if self.original_post_url else "series"
         associated_names = unique_nonempty_lines("".join(self._associated_parts))
         synopsis = normalize_synopsis("".join(self._description_parts))
+        volumes = self.volumes
+        source_lists = sorted({volume.source_list for volume in volumes if volume.source_list})
+        if len(source_lists) > 1:
+            primary_list = source_lists[0]
+            volumes = [
+                volume
+                for volume in volumes
+                if volume.source_list in {0, primary_list}
+                or volume.release_group is not None
+            ]
         return PostDetails(
             entry_type,
             self.original_post_url,
             self.download_url,
-            self.volumes if entry_type == "series" else [],
+            volumes if entry_type == "series" else [],
             associated_names,
             self._genres,
             synopsis,
@@ -346,26 +416,90 @@ def is_volume_label(value: str) -> bool:
 
 def extract_volume_label(value: str) -> str | None:
     match = re.search(
-        r"\b(?:(YEAR|PART)\s+([0-9]+)\s+)?"
-        r"(?:VOLUME|VOL\.?)\s*([0-9]+(?:\.[0-9]+)?)(\+*)",
+        r"\b(?:"
+        r"(?:(YEAR|PART)\s*([0-9]+))"
+        r"|(?:([0-9]+)(?:ST|ND|RD|TH)\s+YEAR)"
+        r"|(?:YR\s*([0-9]+))"
+        r")?\s*"
+        r"(?:VOLUME|VOLUMES|VOL\.?)\s*([0-9]+(?:\.[0-9]+)?)(\+*)",
         value,
         re.IGNORECASE,
     )
     if not match:
         return None
-    number = normalize_volume_number(match.group(3))
-    suffix = match.group(4)
+    number = normalize_volume_number(match.group(5))
+    suffix = match.group(6)
+    trailing = value[match.end() :]
+    canto_match = re.match(r"\s+(CANTO\s+)?([IVX]+)\b", trailing, re.IGNORECASE)
+    book_match = re.match(r"\s*\(\s*BOOK\s+([0-9]+)\s*\)", trailing, re.IGNORECASE)
+    part_match = re.match(
+        r"\s*(?:[-–—,]\s*)?(PART|ACT)\s*([0-9]+)\b",
+        trailing,
+        re.IGNORECASE,
+    )
+    named_half_match = re.match(
+        r"\s+(EXORDIUM|FINALE)\b",
+        trailing,
+        re.IGNORECASE,
+    )
+    qualifier = ""
+    if part_match:
+        qualifier = (
+            f" {part_match.group(1).title()} "
+            f"{normalize_volume_number(part_match.group(2))}"
+        )
+    elif canto_match:
+        canto_prefix = "Canto " if canto_match.group(1) else ""
+        qualifier = f" {canto_prefix}{canto_match.group(2).upper()}"
+    elif book_match:
+        qualifier = f" (Book {normalize_volume_number(book_match.group(1))})"
+    elif named_half_match:
+        qualifier = f" {named_half_match.group(1).title()}"
+
+    named_prefix = ""
+    before_volume = value[: match.start()]
+    if re.search(r"\bSHORT STORY COLLECTION\s*$", before_volume, re.IGNORECASE):
+        named_prefix = "Short Story Collection "
+
     if match.group(1):
         prefix = match.group(1).title()
         prefix_number = normalize_volume_number(match.group(2))
-        return f"{prefix} {prefix_number} Volume {number}{suffix}"
-    return f"Volume {number}{suffix}"
+        return f"{prefix} {prefix_number} {named_prefix}Volume {number}{suffix}{qualifier}"
+    year_number = match.group(3) or match.group(4)
+    if year_number:
+        return (
+            f"Year {normalize_volume_number(year_number)} "
+            f"{named_prefix}Volume {number}{suffix}{qualifier}"
+        )
+    return f"{named_prefix}Volume {number}{suffix}{qualifier}"
 
 
 def extract_named_release_label(value: str) -> str | None:
+    cleaned = re.sub(
+        r"\b(?:DOWNLOAD|OPEN|READ)\b\s*$",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = " ".join(cleaned.split()).strip(" -–—.:|")
+    fanbook = re.search(
+        r"\bFANBOOK(?:\s+(?:VOLUME|VOL\.?)?\s*([0-9]+(?:\.[0-9]+)?))?\b",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if fanbook:
+        number = fanbook.group(1)
+        return f"Fanbook {normalize_volume_number(number)}" if number else "Fanbook"
+    royal_academy = re.search(
+        r"\bROYAL ACADEMY STORIES\b.*$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if royal_academy:
+        return royal_academy.group(0).strip().title()
     match = re.search(
         r"\b(SIDE STORIES|DISC EX|GAIDEN|AFTER STORY)\b",
-        value,
+        cleaned,
         re.IGNORECASE,
     )
     return match.group(1).title() if match else None
@@ -425,7 +559,9 @@ def normalize_volume_number(value: str) -> str:
 def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
     cleaned = re.sub(r"\s+Epub$", "", title, flags=re.IGNORECASE).strip()
     match = re.search(
-        r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)$",
+        r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
+        r"(?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
+        r"(?:\s+Light\s+Novel)?$",
         cleaned,
         flags=re.IGNORECASE,
     )
@@ -434,7 +570,7 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
         return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
 
     slug_match = re.search(
-        r"-volume-([0-9]+(?:\.[0-9]+)?)-epub/?$",
+        r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-epub/?$",
         urllib.parse.urlparse(url).path,
         flags=re.IGNORECASE,
     )
@@ -451,6 +587,93 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
         flags=re.IGNORECASE,
     ).rstrip(" .…")
     return series_title, None
+
+
+def series_identity_key(title: str | None, url: str) -> str:
+    if title:
+        series_title, _ = parse_book_identity(title, url)
+        value = series_title
+    else:
+        value = urllib.parse.unquote(urllib.parse.urlparse(url).path.strip("/"))
+        value = value.replace("-", " ")
+        value = re.sub(
+            r"\bvolume\s+[0-9]+(?:\.[0-9]+)?\b.*$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+    value = re.sub(r"^\s*download\s+", "", value, flags=re.IGNORECASE)
+    value = re.sub(
+        r"\b(?:all\s+volumes?|light\s+novels?|epubs?|pdfs?)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(?:volume|vol\.?)\s*[0-9]+(?:\.[0-9]+)?\b.*$",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"\b(?:part|year)\s+[0-9]+\s*$",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def get_series_catalog_index() -> dict[str, tuple[str, int]]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT sv.series_url,
+                   COUNT(*) AS volume_count,
+                   (
+                       SELECT b.title
+                       FROM books AS b
+                       WHERE b.url = sv.series_url
+                       LIMIT 1
+                   ) AS title
+            FROM series_volumes AS sv
+            GROUP BY sv.series_url
+            """
+        ).fetchall()
+
+    index: dict[str, tuple[str, int]] = {}
+    for row in rows:
+        key = series_identity_key(row["title"], row["series_url"])
+        candidate = (row["series_url"], row["volume_count"])
+        if key and candidate[1] > index.get(key, ("", 0))[1]:
+            index[key] = candidate
+    return index
+
+
+def get_download_catalog_index() -> dict[str, tuple[str, int]]:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT matched.download_url,
+                   matched.series_url,
+                   counts.volume_count
+            FROM series_volumes AS matched
+            JOIN (
+                SELECT series_url, COUNT(*) AS volume_count
+                FROM series_volumes
+                GROUP BY series_url
+            ) AS counts ON counts.series_url = matched.series_url
+            ORDER BY counts.volume_count DESC, matched.series_url
+            """
+        ).fetchall()
+
+    index: dict[str, tuple[str, int]] = {}
+    for row in rows:
+        index.setdefault(
+            row["download_url"],
+            (row["series_url"], row["volume_count"]),
+        )
+    return index
 
 
 @contextmanager
@@ -566,6 +789,7 @@ def initialize_db() -> None:
             "DELETE FROM books WHERE url = ?",
             [(urllib.parse.urljoin(BASE_URL, path),) for path in EXCLUDED_SEARCH_PATHS],
         )
+    build_missing_fallback_catalogs()
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -727,6 +951,8 @@ def update_book_details(url: str, details: PostDetails) -> None:
         replace_series_volumes(url, details.volumes)
         mark_series_metadata_checked(url, now)
         reconcile_series_downloads(url)
+    elif details.original_post_url:
+        build_fallback_catalog(details.original_post_url)
 
 
 def validate_post_details(details: PostDetails) -> None:
@@ -781,6 +1007,97 @@ def mark_series_metadata_checked(series_url: str, checked_at: str | None = None)
             """,
             (series_url, checked_at, checked_at),
         )
+
+
+def build_fallback_catalog(series_url: str) -> int:
+    with connect_db() as connection:
+        existing_rows = connection.execute(
+            """
+            SELECT label, download_url, position
+            FROM series_volumes
+            WHERE series_url = ?
+            ORDER BY position
+            """,
+            (series_url,),
+        ).fetchall()
+        rows = connection.execute(
+            """
+            SELECT title, download_url
+            FROM books
+            WHERE original_post_url = ?
+              AND download_url IS NOT NULL
+            ORDER BY published_at, id
+            """,
+            (series_url,),
+        ).fetchall()
+
+    existing_labels = {row["label"].casefold() for row in existing_rows}
+    existing_downloads = {row["download_url"] for row in existing_rows}
+    next_position = max((row["position"] for row in existing_rows), default=-1) + 1
+    volumes: list[SeriesVolume] = []
+    for row in rows:
+        label = extract_catalog_label(row["title"])
+        download_url = row["download_url"]
+        if (
+            not label
+            or label.casefold() in existing_labels
+            or download_url in existing_downloads
+        ):
+            continue
+        existing_labels.add(label.casefold())
+        existing_downloads.add(download_url)
+        volumes.append(
+            SeriesVolume(label, download_url, next_position + len(volumes))
+        )
+    if not volumes:
+        return 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.executemany(
+            """
+            INSERT OR IGNORE INTO series_volumes
+                (series_url, label, download_url, position, cached_at, release_group)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    series_url,
+                    volume.label,
+                    volume.download_url,
+                    volume.position,
+                    now,
+                    None,
+                )
+                for volume in volumes
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO series_status (series_url, checked_at)
+            VALUES (?, ?)
+            ON CONFLICT(series_url) DO NOTHING
+            """,
+            (series_url, now),
+        )
+    return len(volumes)
+
+
+def build_missing_fallback_catalogs() -> int:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT DISTINCT original_post_url
+            FROM books
+            WHERE entry_type = 'volume'
+              AND original_post_url IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM series_volumes AS sv
+                  WHERE sv.series_url = books.original_post_url
+              )
+            """
+        ).fetchall()
+    return sum(build_fallback_catalog(row["original_post_url"]) for row in rows)
 
 
 def reconcile_series_downloads(series_url: str) -> int:
@@ -1474,29 +1791,12 @@ def list_books(
         rows = connection.execute(sql, params).fetchall()
 
     books = [dict(row) for row in rows]
-    series_urls: set[str] = set()
-    for book in books:
-        series_url = (
-            book["original_post_url"]
-            if book["entry_type"] == "volume"
-            else book["url"] if book["entry_type"] == "series" else None
-        )
-        if series_url:
-            series_urls.add(series_url)
-    volume_counts: dict[str, int] = {}
-    if series_urls:
-        placeholders = ", ".join("?" for _ in series_urls)
-        with connect_db() as connection:
-            volume_rows = connection.execute(
-                f"""
-                SELECT series_url, COUNT(*) AS volume_count
-                FROM series_volumes
-                WHERE series_url IN ({placeholders})
-                GROUP BY series_url
-                """,
-                tuple(series_urls),
-            ).fetchall()
-        volume_counts = {row["series_url"]: row["volume_count"] for row in volume_rows}
+    catalog_index = get_series_catalog_index()
+    download_catalog_index = get_download_catalog_index()
+    volume_counts = {
+        series_url: volume_count
+        for series_url, volume_count in catalog_index.values()
+    }
 
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
@@ -1507,51 +1807,75 @@ def list_books(
             if book["entry_type"] == "volume"
             else book["url"] if book["entry_type"] == "series" else None
         )
+        catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
+        download_catalog = download_catalog_index.get(book["download_url"] or "")
+        if download_catalog and download_catalog[1] > volume_counts.get(series_url or "", 0):
+            series_url = download_catalog[0]
+        if catalog and catalog[1] > volume_counts.get(series_url or "", 0):
+            series_url = catalog[0]
         book["series_title"] = series_title
         book["volume_label"] = volume_label
         book["series_url"] = series_url
         book["volume_count"] = volume_counts.get(series_url or "", 0)
+        book["is_standalone"] = (
+            book["entry_type"] == "series" and book["volume_count"] == 1
+        )
     return books
 
 
 def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT sv.label,
-                   sv.download_url,
-                   sv.position,
-                   sv.cached_at,
-                   sv.release_group,
-                   (
-                       SELECT b.published_at
-                       FROM books AS b
-                       WHERE b.download_url = sv.download_url
-                         AND (
-                             b.original_post_url = sv.series_url
-                             OR b.url = sv.series_url
-                         )
-                       ORDER BY (b.entry_type = 'volume') DESC
-                       LIMIT 1
-                   ) AS published_at,
-                   (
-                       SELECT b.url
-                       FROM books AS b
-                       WHERE b.download_url = sv.download_url
-                         AND (
-                             b.original_post_url = sv.series_url
-                             OR b.url = sv.series_url
-                         )
-                       ORDER BY (b.entry_type = 'volume') DESC
-                       LIMIT 1
-                   ) AS post_url
-            FROM series_volumes AS sv
-            WHERE sv.series_url = ?
-            ORDER BY sv.position
-            """,
+        rows = [
+            dict(row)
+            for row in connection.execute(
+                """
+                SELECT label, download_url, position, cached_at, release_group
+                FROM series_volumes
+                WHERE series_url = ?
+                ORDER BY position
+                """,
+                (series_url,),
+            ).fetchall()
+        ]
+        series_book = connection.execute(
+            "SELECT title FROM books WHERE url = ?",
             (series_url,),
+        ).fetchone()
+        book_rows = connection.execute(
+            """
+            SELECT title, url, download_url, published_at
+            FROM books
+            WHERE entry_type = 'volume'
+            """
         ).fetchall()
-    return [dict(row) for row in rows]
+
+    target_key = series_identity_key(
+        series_book["title"] if series_book else None,
+        series_url,
+    )
+    matches: dict[str, list[sqlite3.Row]] = {}
+    exact_downloads: dict[str, sqlite3.Row] = {}
+    for book in book_rows:
+        if book["download_url"]:
+            exact_downloads[book["download_url"]] = book
+        if series_identity_key(book["title"], book["url"]) != target_key:
+            continue
+        label = extract_catalog_label(book["title"])
+        if label:
+            matches.setdefault(label.casefold(), []).append(book)
+
+    for volume in rows:
+        book = exact_downloads.get(volume["download_url"])
+        if book is None:
+            candidates = matches.get(volume["label"].casefold(), [])
+            book = max(
+                candidates,
+                key=lambda candidate: candidate["published_at"] or "",
+                default=None,
+            )
+        volume["published_at"] = book["published_at"] if book else None
+        volume["post_url"] = book["url"] if book else None
+    return rows
 
 
 class AppHandler(SimpleHTTPRequestHandler):
