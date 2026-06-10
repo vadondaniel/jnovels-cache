@@ -1,68 +1,102 @@
 # JNovels Cache
 
-A small local web app that caches metadata from the public JNovels EPUB search
-pages. It stores titles, post URLs, image URLs, publication dates, cache
-timestamps, series-index links, and current-volume download links in a local
-SQLite database.
+A local web app for browsing cached JNovels EPUB posts and series catalogs.
+It stores metadata and links only; it does not download EPUB files or cover
+images.
 
-## Run
+## Requirements
 
-Double-click `run.bat`, or run:
+- Python 3.10 or newer
+- Internet access while syncing
+
+No third-party Python packages are required.
+
+## Start
+
+On Windows, double-click `run.bat`.
+
+Alternatively, run:
 
 ```powershell
 python server.py --open
 ```
 
-The app opens at <http://127.0.0.1:8765>.
+The app is available at <http://127.0.0.1:8765>. Keep the terminal window open
+while using it. Stop the server with `Ctrl+C`.
 
-## Use
-
-1. Select **Sync cache**.
-2. Choose a sync mode:
-   - **Check for new entries** starts at page 1 and stops when it reaches
-     already-cached results.
-   - **Add older entries** estimates the current cached frontier and adds the
-     requested number of older uncached pages.
-   - **Repair missing details** revisits cached entries whose download, series,
-     or volume-list metadata was not completed by an earlier sync.
-   - **Refresh stale series** revisits catalogs older than 30 days or linked
-     to a volume cached after the catalog's last check.
-   - **Scan a page range** checks an explicit starting page and page count.
-3. Select **Start sync**. The app scans search pages, then visits each result
-   post to identify its entry type and associated links. Normal syncs also
-   retry a small number of older incomplete entries automatically.
-   Normal syncs also refresh a small number of stale series catalogs.
-4. Search and sort the cached results without waiting for JNovels search pages.
-   Results are shown 24 at a time; use the page field to jump directly to any
-   result page. Search, sort, entry filter, and page are preserved in the URL
-   and browser history.
-
-Cards can expose three actions:
-
-- **Download** opens the external download URL found in the post.
-- **Series page** opens the original/main series post for standalone volume entries.
-- **Volumes** opens a separate local dialog containing every cached volume
-  download for that series. When the corresponding standalone volume post is
-  cached, the volume list also shows its publication date. Groups such as
-  **Official translation** and **Fan translation** are preserved when the
-  source page distinguishes them.
-- **Entry page** opens the specific JNovels post represented by the cached card.
-
-The crawler makes requests sequentially and enforces a minimum delay of 0.5
-seconds. Re-running a sync updates existing records instead of duplicating them.
-Repeated detail failures are paused after three automatic attempts; the
-**details pending** indicator opens cache health, where failed entries can be
-retried individually or the full pending backlog can be repaired.
-Only metadata and URLs are cached; EPUB files and cover images are not
-downloaded.
-
-Sync progress is checkpointed locally. Completed search pages are saved
-immediately, and if the server stops unexpectedly it finishes the queued entry
-and series details automatically on the next launch. Because remote search
-pages can shift, an interrupted search itself may still need to be run again.
-
-## Test
+To use a different port:
 
 ```powershell
-python -m unittest discover -s tests -v
+python server.py --port 9000 --open
+```
+
+## Sync
+
+Open **Sync cache** and choose the mode that matches what you need:
+
+| Mode | Use it for |
+| --- | --- |
+| **Check for new entries** | Add recent posts, stopping when cached results are reached. |
+| **Add older entries** | Continue building the cache from older search pages. |
+| **Repair missing details** | Retry entries missing download links, series links, or catalogs. |
+| **Refresh stale series** | Update previously cached series catalogs with newer volumes. |
+| **Scan a page range** | Rescan specific JNovels search pages. |
+
+Syncing can take time because pages are requested sequentially. Existing
+entries are updated rather than duplicated.
+
+If the server stops during a sync, saved work is resumed the next time it
+starts. Run the same sync again if the interrupted search did not reach all
+intended pages.
+
+## Browse
+
+- Search cached titles from the main search field.
+- Use **Series**, **Volumes**, and **Pending** to filter results.
+- Use the page control to jump directly to a result page.
+- **Download** opens the cached external EPUB download link.
+- **Volumes** opens the cached downloads for a series.
+- **Series page** and **Entry page** open the relevant JNovels pages.
+
+The pending or stale status indicator opens repair options and individual
+failure details.
+
+## Local Data
+
+All cached data is stored in `jnovels_cache.db` beside `server.py`.
+
+- Back up the cache by copying `jnovels_cache.db` while the server is stopped.
+- Reset the cache by stopping the server and deleting `jnovels_cache.db`.
+  A new empty database is created on the next start.
+
+## Troubleshooting
+
+**The browser does not open**
+
+Open <http://127.0.0.1:8765> manually.
+
+**The server does not start**
+
+Confirm Python is installed:
+
+```powershell
+python --version
+```
+
+If port 8765 is already in use, start the app with another port:
+
+```powershell
+python server.py --port 9000 --open
+```
+
+**An entry has no download or catalog**
+
+Open the cache health indicator and retry the entry, or run **Repair missing
+details**. Use **Refresh stale series** when a known series is missing newer
+volumes.
+
+## Tests
+
+```powershell
+python -m pytest -q
 ```
