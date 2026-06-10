@@ -61,6 +61,9 @@ class PostDetails:
     original_post_url: str | None
     download_url: str | None
     volumes: list["SeriesVolume"] = field(default_factory=list)
+    associated_names: list[str] = field(default_factory=list)
+    genres: list[str] = field(default_factory=list)
+    synopsis: str | None = None
 
 
 @dataclass
@@ -84,6 +87,12 @@ class PostDetailsParser(HTMLParser):
         self._list_items: list[dict[str, Any]] = []
         self._release_group: str | None = None
         self._volume_urls: set[str] = set()
+        self._description_depth = 0
+        self._associated_depth = 0
+        self._in_associated_heading = False
+        self._description_parts: list[str] = []
+        self._associated_parts: list[str] = []
+        self._genres: list[str] = []
 
     @staticmethod
     def _classes(attrs: dict[str, str | None]) -> set[str]:
@@ -91,12 +100,26 @@ class PostDetailsParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attributes = dict(attrs)
+        classes = self._classes(attributes)
         if tag == "div":
+            if self._description_depth:
+                self._description_depth += 1
+            elif attributes.get("id") == "editdescription":
+                self._description_depth = 1
+            if self._associated_depth:
+                self._associated_depth += 1
+            elif attributes.get("id") == "editassociated":
+                self._associated_depth = 1
             if self._content_depth:
                 self._content_depth += 1
-            elif "post-content" in self._classes(attributes):
+            elif "post-content" in classes:
                 self._content_depth = 1
             return
+
+        if tag in {"h4", "h5", "h6"} and "associated" in classes:
+            self._in_associated_heading = True
+        elif tag == "br" and self._associated_depth:
+            self._associated_parts.append("\n")
 
         if tag == "a" and self._content_depth:
             self._anchor_href = attributes.get("href")
@@ -111,8 +134,17 @@ class PostDetailsParser(HTMLParser):
             self._anchor_parts = []
         elif tag == "li" and self._content_depth and self._list_items:
             self._finish_list_item(self._list_items.pop())
-        elif tag == "div" and self._content_depth:
-            self._content_depth -= 1
+        elif tag in {"h4", "h5", "h6"} and self._in_associated_heading:
+            self._in_associated_heading = False
+        elif tag == "p" and self._description_depth and not self._associated_depth:
+            self._description_parts.append("\n\n")
+        elif tag == "div":
+            if self._associated_depth:
+                self._associated_depth -= 1
+            if self._description_depth:
+                self._description_depth -= 1
+            if self._content_depth:
+                self._content_depth -= 1
 
     def handle_data(self, data: str) -> None:
         normalized = " ".join(data.split()).casefold()
@@ -125,6 +157,10 @@ class PostDetailsParser(HTMLParser):
             self._anchor_parts.append(data)
         if self._list_items:
             self._list_items[-1]["parts"].append(data)
+        if self._associated_depth:
+            self._associated_parts.append(data)
+        elif self._description_depth and not self._in_associated_heading:
+            self._description_parts.append(data)
 
     def _finish_anchor(self) -> None:
         href = urllib.parse.urljoin(self.post_url, self._anchor_href or "")
@@ -133,6 +169,17 @@ class PostDetailsParser(HTMLParser):
 
         if re.fullmatch(r"refer to (?:the )?(?:original|main) post", normalized):
             self.original_post_url = href
+            return
+
+        parsed_href = urllib.parse.urlparse(href)
+        genre = text.rstrip(", ")
+        if (
+            parsed_href.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
+            and "/category/light-novels/" in parsed_href.path.casefold()
+            and genre
+            and genre not in self._genres
+        ):
+            self._genres.append(genre)
             return
 
         if not is_external_http_url(href):
@@ -172,11 +219,16 @@ class PostDetailsParser(HTMLParser):
 
     def details(self) -> PostDetails:
         entry_type = "volume" if self.original_post_url else "series"
+        associated_names = unique_nonempty_lines("".join(self._associated_parts))
+        synopsis = normalize_synopsis("".join(self._description_parts))
         return PostDetails(
             entry_type,
             self.original_post_url,
             self.download_url,
             self.volumes if entry_type == "series" else [],
+            associated_names,
+            self._genres,
+            synopsis,
         )
 
 
@@ -332,6 +384,38 @@ def extract_trailing_catalog_label(value: str) -> str | None:
     return f"Volume {normalize_volume_number(match.group(1))}{match.group(2)}"
 
 
+def unique_nonempty_lines(value: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in value.splitlines():
+        line = " ".join(raw_line.split()).strip(" ,")
+        if line and line not in lines:
+            lines.append(line)
+    return lines
+
+
+def normalize_synopsis(value: str) -> str | None:
+    paragraphs = [
+        " ".join(paragraph.split())
+        for paragraph in re.split(r"\n\s*\n", value)
+        if paragraph.strip()
+    ]
+    return "\n\n".join(paragraphs) or None
+
+
+def encode_string_list(values: list[str]) -> str | None:
+    return json.dumps(values, ensure_ascii=False) if values else None
+
+
+def decode_string_list(value: str | None) -> list[str]:
+    if not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return [item for item in decoded if isinstance(item, str)] if isinstance(decoded, list) else []
+
+
 def normalize_volume_number(value: str) -> str:
     whole, separator, fraction = value.partition(".")
     normalized_whole = str(int(whole))
@@ -401,7 +485,10 @@ def initialize_db() -> None:
                 detail_cached_at TEXT,
                 detail_attempts INTEGER NOT NULL DEFAULT 0,
                 detail_last_attempt_at TEXT,
-                detail_last_error TEXT
+                detail_last_error TEXT,
+                associated_names TEXT,
+                genres TEXT,
+                synopsis TEXT
             );
 
             CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
@@ -428,7 +515,8 @@ def initialize_db() -> None:
 
             CREATE TABLE IF NOT EXISTS series_status (
                 series_url TEXT PRIMARY KEY,
-                checked_at TEXT NOT NULL
+                checked_at TEXT NOT NULL,
+                metadata_checked_at TEXT
             );
             """
         )
@@ -443,6 +531,9 @@ def initialize_db() -> None:
             "detail_attempts": "ALTER TABLE books ADD COLUMN detail_attempts INTEGER NOT NULL DEFAULT 0",
             "detail_last_attempt_at": "ALTER TABLE books ADD COLUMN detail_last_attempt_at TEXT",
             "detail_last_error": "ALTER TABLE books ADD COLUMN detail_last_error TEXT",
+            "associated_names": "ALTER TABLE books ADD COLUMN associated_names TEXT",
+            "genres": "ALTER TABLE books ADD COLUMN genres TEXT",
+            "synopsis": "ALTER TABLE books ADD COLUMN synopsis TEXT",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -454,6 +545,14 @@ def initialize_db() -> None:
         if "release_group" not in volume_columns:
             connection.execute(
                 "ALTER TABLE series_volumes ADD COLUMN release_group TEXT"
+            )
+        status_columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(series_status)").fetchall()
+        }
+        if "metadata_checked_at" not in status_columns:
+            connection.execute(
+                "ALTER TABLE series_status ADD COLUMN metadata_checked_at TEXT"
             )
         connection.execute(
             """
@@ -583,6 +682,8 @@ def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
 
 def update_book_details(url: str, details: PostDetails) -> None:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    associated_names = encode_string_list(details.associated_names)
+    genres = encode_string_list(details.genres)
     with connect_db() as connection:
         connection.execute(
             """
@@ -593,7 +694,10 @@ def update_book_details(url: str, details: PostDetails) -> None:
                 detail_cached_at = ?,
                 detail_attempts = 0,
                 detail_last_attempt_at = ?,
-                detail_last_error = NULL
+                detail_last_error = NULL,
+                associated_names = COALESCE(?, associated_names),
+                genres = COALESCE(?, genres),
+                synopsis = COALESCE(?, synopsis)
             WHERE url = ?
             """,
             (
@@ -602,11 +706,26 @@ def update_book_details(url: str, details: PostDetails) -> None:
                 details.download_url,
                 now,
                 now,
+                associated_names,
+                genres,
+                details.synopsis,
                 url,
             ),
         )
+        if details.entry_type == "series":
+            connection.execute(
+                """
+                UPDATE books
+                SET associated_names = COALESCE(?, associated_names),
+                    genres = COALESCE(?, genres),
+                    synopsis = COALESCE(?, synopsis)
+                WHERE original_post_url = ?
+                """,
+                (associated_names, genres, details.synopsis, url),
+            )
     if details.entry_type == "series":
         replace_series_volumes(url, details.volumes)
+        mark_series_metadata_checked(url, now)
         reconcile_series_downloads(url)
 
 
@@ -647,6 +766,20 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
             ON CONFLICT(series_url) DO UPDATE SET checked_at = excluded.checked_at
             """,
             (series_url, now),
+        )
+
+
+def mark_series_metadata_checked(series_url: str, checked_at: str | None = None) -> None:
+    checked_at = checked_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO series_status (series_url, checked_at, metadata_checked_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(series_url) DO UPDATE
+            SET metadata_checked_at = excluded.metadata_checked_at
+            """,
+            (series_url, checked_at, checked_at),
         )
 
 
@@ -849,6 +982,43 @@ def get_stale_series_urls(limit: int) -> list[str]:
             (series_stale_cutoff(), limit),
         ).fetchall()
     return [row["series_url"] for row in rows]
+
+
+def get_series_metadata_backfill_urls(
+    limit: int,
+    *,
+    exclude_urls: set[str] | None = None,
+) -> list[str]:
+    conditions = ["metadata_checked_at IS NULL"]
+    params: list[Any] = []
+    if exclude_urls:
+        placeholders = ", ".join("?" for _ in exclude_urls)
+        conditions.append(f"series_url NOT IN ({placeholders})")
+        params.extend(sorted(exclude_urls))
+    params.append(limit)
+
+    with connect_db() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT series_url
+            FROM series_status
+            WHERE {" AND ".join(conditions)}
+            ORDER BY checked_at DESC, series_url
+            LIMIT ?
+            """,
+            tuple(params),
+        ).fetchall()
+    return [row["series_url"] for row in rows]
+
+
+def get_series_refresh_urls(limit: int) -> list[str]:
+    urls = get_stale_series_urls(limit)
+    remaining = limit - len(urls)
+    if remaining > 0:
+        urls.extend(
+            get_series_metadata_backfill_urls(remaining, exclude_urls=set(urls))
+        )
+    return urls
 
 
 def list_repair_failures(limit: int = 100) -> list[dict[str, Any]]:
@@ -1070,7 +1240,7 @@ def run_sync(
         elif mode == "series_refresh":
             books = []
             detail_urls = []
-            scheduled_series_urls.update(get_stale_series_urls(max_pages))
+            scheduled_series_urls.update(get_series_refresh_urls(max_pages))
         elif mode == "repair":
             books: list[Book] = []
             detail_urls = get_incomplete_detail_urls(max_pages)
@@ -1101,9 +1271,7 @@ def run_sync(
                     exclude_urls=set(detail_urls),
                 )
             )
-            scheduled_series_urls.update(
-                get_stale_series_urls(AUTO_SERIES_REFRESH_LIMIT)
-            )
+            scheduled_series_urls.update(get_series_refresh_urls(AUTO_SERIES_REFRESH_LIMIT))
         sync_state["phase"] = "details"
         sync_state["details_total"] = len(detail_urls)
         checkpoint["phase"] = "details"
@@ -1240,8 +1408,10 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
     params: list[str] = []
     if query:
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        conditions.append("title LIKE ? ESCAPE '\\'")
-        params.append(f"%{escaped}%")
+        conditions.append(
+            "(title LIKE ? ESCAPE '\\' OR associated_names LIKE ? ESCAPE '\\')"
+        )
+        params.extend([f"%{escaped}%", f"%{escaped}%"])
 
     if entry_filter == "series":
         conditions.append("entry_type = 'series'")
@@ -1290,7 +1460,8 @@ def list_books(
     where_clause, filter_params = book_filter(query, entry_filter)
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
-               entry_type, original_post_url, download_url, detail_cached_at
+               entry_type, original_post_url, download_url, detail_cached_at,
+               associated_names, genres, synopsis
         FROM books
     """ + where_clause
     params: tuple[Any, ...] = filter_params
@@ -1328,6 +1499,8 @@ def list_books(
         volume_counts = {row["series_url"]: row["volume_count"] for row in volume_rows}
 
     for book in books:
+        book["associated_names"] = decode_string_list(book["associated_names"])
+        book["genres"] = decode_string_list(book["genres"])
         series_title, volume_label = parse_book_identity(book["title"], book["url"])
         series_url = (
             book["original_post_url"]

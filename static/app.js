@@ -60,8 +60,19 @@ const elements = {
   catalogTitle: document.querySelector("#catalog-title"),
   catalogCount: document.querySelector("#catalog-count"),
   catalogList: document.querySelector("#catalog-list"),
+  catalogDetails: document.querySelector("#catalog-details"),
+  catalogDetailsBody: document.querySelector("#catalog-details-body"),
   catalogSeriesLink: document.querySelector("#catalog-series-link"),
   catalogClose: document.querySelector("#catalog-close"),
+  detailsDialog: document.querySelector("#details-dialog"),
+  detailsTitle: document.querySelector("#details-title"),
+  detailsGenresSection: document.querySelector("#details-genres-section"),
+  detailsGenres: document.querySelector("#details-genres"),
+  detailsNamesSection: document.querySelector("#details-names-section"),
+  detailsNames: document.querySelector("#details-names"),
+  detailsSynopsisSection: document.querySelector("#details-synopsis-section"),
+  detailsSynopsis: document.querySelector("#details-synopsis"),
+  detailsClose: document.querySelector("#details-close"),
 };
 
 function updateFilterButtons() {
@@ -133,6 +144,7 @@ function renderBooks(books, total) {
     const seriesLink = card.querySelector(".book-card__action--series");
     const postLink = card.querySelector(".book-card__action--post");
     const catalogButton = card.querySelector(".book-card__action--catalog");
+    const detailsButton = card.querySelector(".book-card__details");
 
     titleLink.textContent = book.series_title;
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
@@ -158,6 +170,14 @@ function renderBooks(books, total) {
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
+    }
+    if (
+      !book.volume_count
+      && (book.synopsis || book.associated_names.length || book.genres.length)
+    ) {
+      detailsButton.addEventListener("click", () => openDetails(book));
+    } else {
+      detailsButton.hidden = true;
     }
 
     if (book.entry_type === "series" && book.volume_count) {
@@ -205,6 +225,88 @@ function renderBooks(books, total) {
   elements.emptySync.hidden = hasQuery || hasFilter;
 }
 
+function openDetails(book) {
+  elements.detailsTitle.textContent = book.series_title;
+
+  elements.detailsGenres.replaceChildren();
+  elements.detailsGenresSection.hidden = !book.genres.length;
+  book.genres.forEach((genre) => {
+    const tag = document.createElement("span");
+    tag.textContent = genre;
+    elements.detailsGenres.append(tag);
+  });
+
+  elements.detailsNames.replaceChildren();
+  elements.detailsNamesSection.hidden = !book.associated_names.length;
+  book.associated_names.forEach((name) => {
+    const item = document.createElement("li");
+    item.textContent = name;
+    elements.detailsNames.append(item);
+  });
+
+  elements.detailsSynopsis.replaceChildren();
+  elements.detailsSynopsisSection.hidden = !book.synopsis;
+  (book.synopsis || "").split(/\n\s*\n/).forEach((paragraph) => {
+    if (!paragraph) return;
+    const text = document.createElement("p");
+    text.textContent = paragraph;
+    elements.detailsSynopsis.append(text);
+  });
+
+  elements.detailsDialog.showModal();
+}
+
+function renderSeriesInformation(container, book) {
+  container.replaceChildren();
+  const fragment = document.createDocumentFragment();
+
+  if (book.genres.length) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    const genres = document.createElement("div");
+    heading.textContent = "Genres";
+    genres.className = "details-dialog__genres";
+    book.genres.forEach((genre) => {
+      const tag = document.createElement("span");
+      tag.textContent = genre;
+      genres.append(tag);
+    });
+    section.append(heading, genres);
+    fragment.append(section);
+  }
+
+  if (book.associated_names.length) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    const names = document.createElement("ul");
+    heading.textContent = "Associated names";
+    book.associated_names.forEach((name) => {
+      const item = document.createElement("li");
+      item.textContent = name;
+      names.append(item);
+    });
+    section.append(heading, names);
+    fragment.append(section);
+  }
+
+  if (book.synopsis) {
+    const section = document.createElement("section");
+    const heading = document.createElement("h3");
+    const synopsis = document.createElement("div");
+    heading.textContent = "Synopsis";
+    synopsis.className = "details-dialog__synopsis";
+    book.synopsis.split(/\n\s*\n/).forEach((paragraph) => {
+      const text = document.createElement("p");
+      text.textContent = paragraph;
+      synopsis.append(text);
+    });
+    section.append(heading, synopsis);
+    fragment.append(section);
+  }
+
+  container.append(fragment);
+}
+
 function renderPagination(payload) {
   state.page = payload.page;
   state.pageSize = payload.page_size;
@@ -234,6 +336,12 @@ async function openCatalog(book) {
   elements.catalogTitle.textContent = book.series_title;
   elements.catalogCount.textContent = "Loading volumes...";
   elements.catalogList.replaceChildren();
+  const hasDetails = Boolean(
+    book.synopsis || book.associated_names.length || book.genres.length,
+  );
+  elements.catalogDetails.hidden = !hasDetails;
+  elements.catalogDetails.open = false;
+  if (hasDetails) renderSeriesInformation(elements.catalogDetailsBody, book);
   elements.catalogSeriesLink.href = book.series_url;
   elements.catalogDialog.showModal();
 
@@ -291,6 +399,10 @@ async function openCatalog(book) {
 elements.catalogClose.addEventListener("click", () => elements.catalogDialog.close());
 elements.catalogDialog.addEventListener("click", (event) => {
   if (event.target === elements.catalogDialog) elements.catalogDialog.close();
+});
+elements.detailsClose.addEventListener("click", () => elements.detailsDialog.close());
+elements.detailsDialog.addEventListener("click", (event) => {
+  if (event.target === elements.detailsDialog) elements.detailsDialog.close();
 });
 
 async function loadBooks({ scroll = false, historyMode = null } = {}) {
@@ -387,7 +499,7 @@ function updateSyncMode() {
     elements.maxPages.value = "250";
     elements.maxPages.max = "2000";
     elements.syncHelp.textContent =
-      "Refreshes series catalogs older than 30 days or superseded by a newer cached volume.";
+      "Updates stale catalogs and fills missing genres, associated names, and synopses.";
   } else {
     elements.maxPagesLabel.textContent = "Pages to scan";
     elements.maxPages.value = "6";

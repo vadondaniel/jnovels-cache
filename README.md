@@ -39,7 +39,7 @@ Open **Sync cache** and choose the mode that matches what you need:
 | **Check for new entries** | Add recent posts, stopping when cached results are reached. |
 | **Add older entries** | Continue building the cache from older search pages. |
 | **Repair missing details** | Retry entries missing download links, series links, or catalogs. |
-| **Refresh stale series** | Update previously cached series catalogs with newer volumes. |
+| **Refresh series data** | Update catalogs and fill missing genres, associated names, and synopses. |
 | **Scan a page range** | Rescan specific JNovels search pages. |
 
 Syncing can take time because pages are requested sequentially. Existing
@@ -92,8 +92,8 @@ python server.py --port 9000 --open
 **An entry has no download or catalog**
 
 Open the cache health indicator and retry the entry, or run **Repair missing
-details**. Use **Refresh stale series** when a known series is missing newer
-volumes.
+details**. Use **Refresh series data** when a catalog or its descriptive
+information is missing.
 
 ## Tests
 

@@ -106,7 +106,7 @@
           <option value="catchup">Check for new entries</option>
           <option value="extend">Add older entries</option>
           <option value="repair">Repair missing details</option>
-          <option value="series_refresh">Refresh stale series</option>
+          <option value="series_refresh">Refresh series data</option>
           <option value="manual">Scan a page range</option>
         </select>
       </label>
@@ -149,7 +149,7 @@
     </header>
     <div id="repair-list" class="repair-dialog__list"></div>
     <footer class="repair-dialog__footer">
-      <button id="refresh-series" class="button button--quiet" type="button">Refresh stale series</button>
+      <button id="refresh-series" class="button button--quiet" type="button">Refresh series data</button>
       <button id="repair-all" class="button button--dark" type="button">Repair pending entries</button>
     </footer>
   </dialog>
@@ -174,6 +174,7 @@
           <button class="book-card__action book-card__action--catalog" type="button">Volumes</button>
         </div>
         <div class="book-card__links">
+          <button class="book-card__details" type="button">About</button>
           <a class="book-card__action--series" target="_blank" rel="noopener">Series page</a>
           <a class="book-card__action--post" target="_blank" rel="noopener">Entry page</a>
         </div>
@@ -190,9 +191,39 @@
       </div>
       <button id="catalog-close" class="catalog-dialog__close" type="button" aria-label="Close volumes">×</button>
     </div>
-    <div id="catalog-list" class="catalog-dialog__list"></div>
+    <div class="catalog-dialog__content">
+      <details id="catalog-details" class="catalog-dialog__details">
+        <summary>Series information</summary>
+        <div id="catalog-details-body"></div>
+      </details>
+      <div id="catalog-list" class="catalog-dialog__list"></div>
+    </div>
     <div class="catalog-dialog__footer">
       <a id="catalog-series-link" target="_blank" rel="noopener">Open series page <span aria-hidden="true">↗</span></a>
+    </div>
+  </dialog>
+
+  <dialog id="details-dialog" class="details-dialog">
+    <header class="details-dialog__header">
+      <div>
+        <p class="eyebrow">About this series</p>
+        <h2 id="details-title">Series</h2>
+      </div>
+      <button id="details-close" class="details-dialog__close" type="button" aria-label="Close series details">×</button>
+    </header>
+    <div class="details-dialog__body">
+      <section id="details-genres-section">
+        <h3>Genres</h3>
+        <div id="details-genres" class="details-dialog__genres"></div>
+      </section>
+      <section id="details-names-section">
+        <h3>Associated names</h3>
+        <ul id="details-names"></ul>
+      </section>
+      <section id="details-synopsis-section">
+        <h3>Synopsis</h3>
+        <div id="details-synopsis" class="details-dialog__synopsis"></div>
+      </section>
     </div>
   </dialog>
 

@@ -103,6 +103,32 @@ STANDALONE_VOLUME_LINKS_HTML = """
 </article>
 """
 
+METADATA_HTML = """
+<article>
+  <div class="post-content clear">
+    <h4 class="seriesinfo"><span>Description</span></h4>
+    <div id="editdescription">
+      <div id="editdescription">
+        <p>First synopsis paragraph.</p>
+        <p>Second synopsis paragraph.</p>
+        <h5 class="seriesother associated">Associated Names</h5>
+        <div id="editassociated">
+          Example Japanese Title<br>
+          例の日本語タイトル
+        </div>
+      </div>
+    </div>
+    <p><strong>GENRE</strong>:</p>
+    <p>
+      <a href="https://jnovels.com/category/light-novels/action/">Action</a>,
+      <a href="https://jnovels.com/category/light-novels/fantasy/">Fantasy, </a>
+      <a href="https://jnovels.com/category/news/">News</a>
+    </p>
+    <ol><li>VOLUME 01 <a href="https://files.example/one">DOWNLOAD</a></li></ol>
+  </div>
+</article>
+"""
+
 
 class ParserTests(unittest.TestCase):
     def test_parses_long_volume_title_into_series_and_volume_label(self):
@@ -244,6 +270,21 @@ class ParserTests(unittest.TestCase):
             ["Volume 1", "Year 2 Volume 10", "Part 5 Volume 4.5"],
         )
         self.assertEqual(details.download_url, "https://files.example/one")
+
+    def test_extracts_synopsis_associated_names_and_genres(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(METADATA_HTML)
+
+        details = parser.details()
+        self.assertEqual(
+            details.synopsis,
+            "First synopsis paragraph.\n\nSecond synopsis paragraph.",
+        )
+        self.assertEqual(
+            details.associated_names,
+            ["Example Japanese Title", "例の日本語タイトル"],
+        )
+        self.assertEqual(details.genres, ["Action", "Fantasy"])
 
     def test_recognizes_decimal_and_prefixed_volume_labels(self):
         self.assertTrue(server.is_volume_label("VOLUME 04.5"))
@@ -388,6 +429,34 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["original_post_url"], "https://example/series")
         self.assertEqual(saved["download_url"], "https://files.example/download")
         self.assertIsNotNone(saved["detail_cached_at"])
+
+    def test_series_metadata_is_searchable_and_propagated_to_volume_entries(self):
+        series_url = "https://example/series"
+        volume = server.Book("Example Volume 2", "https://example/volume-2", None, None)
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series_url, "https://files.example/two"),
+        )
+
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/one",
+                [server.SeriesVolume("Volume 1", "https://files.example/one", 0)],
+                ["Alternate Example Name", "別名"],
+                ["Fantasy", "Romance"],
+                "A useful synopsis.",
+            ),
+        )
+
+        saved = server.list_books("Alternate Example", "title_asc")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0]["associated_names"], ["Alternate Example Name", "別名"])
+        self.assertEqual(saved[0]["genres"], ["Fantasy", "Romance"])
+        self.assertEqual(saved[0]["synopsis"], "A useful synopsis.")
 
     def test_replaces_and_exposes_series_volume_list(self):
         book = server.Book("Example Series", "https://example/series", None, None)
@@ -598,6 +667,29 @@ class DatabaseTests(unittest.TestCase):
             {old_series, changed_series},
         )
         self.assertEqual(server.count_stale_series(), 2)
+
+    def test_series_metadata_backfill_is_selected_only_until_checked(self):
+        unchecked = "https://example/unchecked-series"
+        checked = "https://example/checked-series"
+        for url in (unchecked, checked):
+            server.replace_series_volumes(
+                url,
+                [server.SeriesVolume("Volume 1", f"{url}/download", 0)],
+            )
+
+        self.assertEqual(
+            set(server.get_series_metadata_backfill_urls(10)),
+            {unchecked, checked},
+        )
+
+        server.mark_series_metadata_checked(checked)
+
+        self.assertEqual(
+            server.get_series_metadata_backfill_urls(10),
+            [unchecked],
+        )
+        self.assertIn(unchecked, server.get_series_refresh_urls(10))
+        self.assertNotIn(checked, server.get_series_refresh_urls(10))
 
     def test_fresh_catalog_with_duplicate_labels_is_not_permanently_stale(self):
         series_url = "https://jnovels.com/duplicate-labels/"
