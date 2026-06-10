@@ -89,17 +89,17 @@ class PostDetailsParser(HTMLParser):
     def _classes(attrs: dict[str, str | None]) -> set[str]:
         return set((attrs.get("class") or "").split())
 
-    def handle_starttag(self, tag: str, attrs_list: list[tuple[str, str | None]]) -> None:
-        attrs = dict(attrs_list)
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
         if tag == "div":
             if self._content_depth:
                 self._content_depth += 1
-            elif "post-content" in self._classes(attrs):
+            elif "post-content" in self._classes(attributes):
                 self._content_depth = 1
             return
 
         if tag == "a" and self._content_depth:
-            self._anchor_href = attrs.get("href")
+            self._anchor_href = attributes.get("href")
             self._anchor_parts = []
         elif tag == "li" and self._content_depth:
             self._list_items.append({"parts": [], "download_url": None})
@@ -197,9 +197,9 @@ class SearchResultsParser(HTMLParser):
     def _classes(attrs: dict[str, str | None]) -> set[str]:
         return set((attrs.get("class") or "").split())
 
-    def handle_starttag(self, tag: str, attrs_list: list[tuple[str, str | None]]) -> None:
-        attrs = dict(attrs_list)
-        classes = self._classes(attrs)
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = self._classes(attributes)
 
         if tag == "article":
             if self._article_depth == 0:
@@ -215,11 +215,11 @@ class SearchResultsParser(HTMLParser):
         elif tag in {"h1", "h2"} and "post-title" in classes:
             self._in_title = True
         elif tag == "a" and self._in_title and not self._url:
-            self._url = attrs.get("href")
+            self._url = attributes.get("href")
         elif tag == "a" and "post-date" in classes:
             self._in_date = True
         elif tag == "img" and self._in_featured and not self._image_url:
-            self._image_url = attrs.get("src") or attrs.get("data-src")
+            self._image_url = attributes.get("src") or attributes.get("data-src")
 
     def handle_endtag(self, tag: str) -> None:
         if self._article_depth == 0:
@@ -1520,8 +1520,8 @@ class AppHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def log_message(self, fmt: str, *args: Any) -> None:
-        print(f"[{self.log_date_time_string()}] {fmt % args}")
+    def log_message(self, format: str, *args: Any) -> None:
+        print(f"[{self.log_date_time_string()}] {format % args}")
 
 
 def main() -> None:

@@ -698,7 +698,7 @@ class SyncTests(unittest.TestCase):
         saved = {book["url"]: book for book in server.list_books("", "title_asc")}
         self.assertIn(book_url, saved)
         checkpoint = server.load_sync_checkpoint()
-        self.assertIsNotNone(checkpoint)
+        assert checkpoint is not None
         self.assertEqual(checkpoint["pending_detail_urls"], [book_url])
 
         with (
