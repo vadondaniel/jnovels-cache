@@ -152,7 +152,7 @@ class PostDetailsParser(HTMLParser):
         if not download_url:
             return
         text = " ".join("".join(item["parts"]).split())
-        label = extract_catalog_label(text)
+        label = extract_catalog_label(text) or extract_trailing_catalog_label(text)
         if not label:
             return
         self._append_volume(label, download_url)
@@ -321,6 +321,15 @@ def extract_named_release_label(value: str) -> str | None:
 
 def extract_catalog_label(value: str) -> str | None:
     return extract_volume_label(value) or extract_named_release_label(value)
+
+
+def extract_trailing_catalog_label(value: str) -> str | None:
+    without_action = re.sub(r"\bDOWNLOAD\b", "", value, flags=re.IGNORECASE)
+    cleaned = without_action.rstrip(" -–—.:|")
+    match = re.search(r"\b([0-9]+(?:\.[0-9]+)?)(\+*)$", cleaned)
+    if not match:
+        return None
+    return f"Volume {normalize_volume_number(match.group(1))}{match.group(2)}"
 
 
 def normalize_volume_number(value: str) -> str:

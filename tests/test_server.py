@@ -207,6 +207,24 @@ class ParserTests(unittest.TestCase):
             ],
         )
 
+    def test_extracts_catalog_from_titles_ending_in_volume_numbers(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <ol>
+                <li>Example Series 1 ----- <a href="https://files.example/one">DOWNLOAD</a></li>
+                <li>Example Series 15 ----- <a href="https://files.example/fifteen">DOWNLOAD</a></li>
+              </ol>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [volume.label for volume in parser.details().volumes],
+            ["Volume 1", "Volume 15"],
+        )
+
     def test_preserves_meaningful_volume_suffixes(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-series/")
         parser.feed(SPECIAL_VOLUME_LABELS_HTML)
