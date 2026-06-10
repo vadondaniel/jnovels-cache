@@ -241,6 +241,29 @@ class ParserTests(unittest.TestCase):
             ["Side Stories", "Disc Ex", "Gaiden", "After Story"],
         )
 
+    def test_extracts_standalone_named_catalog_release(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p><a href="https://files.example/side-stories">Side Stories</a></p>
+            </div>
+            """
+        )
+
+        details = parser.details()
+        self.assertEqual(details.download_url, "https://files.example/side-stories")
+        self.assertEqual(
+            details.volumes,
+            [
+                server.SeriesVolume(
+                    "Side Stories",
+                    "https://files.example/side-stories",
+                    0,
+                )
+            ],
+        )
+
     def test_normalizes_zero_padded_volume_numbers(self):
         self.assertEqual(server.normalize_volume_number("01"), "1")
         self.assertEqual(server.normalize_volume_number("008"), "8")
@@ -558,7 +581,7 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(server.count_stale_series(), 2)
 
-    def test_catalog_with_ungrouped_duplicate_labels_needs_refresh(self):
+    def test_fresh_catalog_with_duplicate_labels_is_not_permanently_stale(self):
         series_url = "https://jnovels.com/duplicate-labels/"
         server.upsert_books([server.Book("Duplicate Labels", series_url, None, None)])
         server.update_book_details(
@@ -582,8 +605,8 @@ class DatabaseTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(server.get_stale_series_urls(10), [series_url])
-        self.assertEqual(server.count_stale_series(), 1)
+        self.assertEqual(server.get_stale_series_urls(10), [])
+        self.assertEqual(server.count_stale_series(), 0)
 
 
 class SyncTests(unittest.TestCase):
@@ -760,6 +783,43 @@ class SyncTests(unittest.TestCase):
         failure = server.list_repair_failures()[0]
         self.assertEqual(failure["url"], url)
         self.assertIn("No download link found", failure["detail_last_error"])
+
+    def test_missing_child_download_is_recovered_from_parent_catalog(self):
+        child_url = "https://jnovels.com/example-part-5-volume-2-epub/"
+        series_url = "https://jnovels.com/example-series/"
+        server.upsert_books(
+            [server.Book("Example Part 5 Volume 2 Epub", child_url, None, None)]
+        )
+        child_details = server.PostDetails("volume", series_url, None)
+        series_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [
+                server.SeriesVolume(
+                    "Part 5 Volume 2",
+                    "https://files.example/part-5-v2",
+                    0,
+                )
+            ],
+        )
+
+        def fake_details(url):
+            return child_details if url == child_url else series_details
+
+        with (
+            patch.object(server, "fetch_post_details", side_effect=fake_details),
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0.5, "repair", [child_url])
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertEqual(saved[child_url]["original_post_url"], series_url)
+        self.assertEqual(
+            saved[child_url]["download_url"],
+            "https://files.example/part-5-v2",
+        )
+        self.assertEqual(server.list_repair_failures(), [])
 
     def test_normal_sync_automatically_repairs_a_bounded_backlog(self):
         pending_url = "https://jnovels.com/pending/"

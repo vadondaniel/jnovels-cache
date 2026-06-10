@@ -137,15 +137,15 @@ class PostDetailsParser(HTMLParser):
 
         if not is_external_http_url(href):
             return
-        volume_label = extract_volume_label(text)
-        if self._list_items and ("download" in normalized or volume_label):
+        catalog_label = extract_catalog_label(text)
+        if self._list_items and ("download" in normalized or catalog_label):
             self._list_items[-1]["download_url"] = href
         if not self.download_url and (
-            "download" in normalized or volume_label
+            "download" in normalized or catalog_label
         ):
             self.download_url = href
-        if volume_label and not self._list_items:
-            self._append_volume(volume_label, href)
+        if catalog_label and not self._list_items:
+            self._append_volume(catalog_label, href)
 
     def _finish_list_item(self, item: dict[str, Any]) -> None:
         download_url = item["download_url"]
@@ -454,6 +454,10 @@ def initialize_db() -> None:
             GROUP BY series_url
             """
         )
+        connection.executemany(
+            "DELETE FROM books WHERE url = ?",
+            [(urllib.parse.urljoin(BASE_URL, path),) for path in EXCLUDED_SEARCH_PATHS],
+        )
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -598,7 +602,7 @@ def update_book_details(url: str, details: PostDetails) -> None:
 
 
 def validate_post_details(details: PostDetails) -> None:
-    if not details.download_url:
+    if not details.download_url and not details.volumes:
         raise ValueError("No download link found on the post.")
 
 
@@ -801,14 +805,6 @@ def stale_series_where_clause() -> str:
                 FROM books AS b
                 WHERE b.original_post_url = ss.series_url
                   AND b.cached_at > ss.checked_at
-            )
-            OR EXISTS (
-                SELECT 1
-                FROM series_volumes AS sv
-                WHERE sv.series_url = ss.series_url
-                GROUP BY sv.series_url
-                HAVING COUNT(*) > COUNT(DISTINCT sv.label)
-                   AND COUNT(sv.release_group) = 0
             )
         )
     """
@@ -1111,12 +1107,12 @@ def run_sync(
             completed = False
             try:
                 details = fetch_post_details(url)
-                validate_post_details(details)
                 update_book_details(url, details)
                 if details.entry_type == "series":
                     discovered_series_urls.add(url)
                 elif details.original_post_url:
                     discovered_series_urls.add(details.original_post_url)
+                validate_post_details(details)
                 completed = True
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                 record_detail_failure(url, exc)
@@ -1145,8 +1141,8 @@ def run_sync(
             completed = False
             try:
                 details = fetch_post_details(series_url)
-                validate_post_details(details)
                 update_book_details(series_url, details)
+                validate_post_details(details)
                 completed = True
             except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
                 record_detail_failure(series_url, exc)
