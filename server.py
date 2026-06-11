@@ -922,9 +922,14 @@ def fetch_page(page: int, timeout: int = 30) -> list[Book]:
             "Accept-Language": "en-US,en;q=0.8",
         },
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        body = response.read().decode(charset, errors="replace")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            charset = response.headers.get_content_charset() or "utf-8"
+            body = response.read().decode(charset, errors="replace")
+    except urllib.error.HTTPError as exc:
+        if exc.code == HTTPStatus.NOT_FOUND and page > 1:
+            return []
+        raise
 
     parser = SearchResultsParser()
     parser.feed(body)
@@ -1435,6 +1440,7 @@ sync_state: dict[str, Any] = {
     "mode": None,
     "phase": None,
     "page": 0,
+    "search_end_page": None,
     "pages_requested": 0,
     "pages_completed": 0,
     "items_seen": 0,
@@ -1469,6 +1475,7 @@ def set_sync_started(
             "mode": mode,
             "phase": "search",
             "page": start_page,
+            "search_end_page": None,
             "pages_requested": max_pages,
             "pages_completed": 0,
             "items_seen": 0,
@@ -1565,6 +1572,8 @@ def collect_sync_books(
         if page not in fetched_pages:
             sync_state["page"] = page
             fetched_pages[page] = fetch_page(page)
+            if not fetched_pages[page]:
+                sync_state["search_end_page"] = page
             sync_state["pages_completed"] += 1
             sync_state["items_seen"] += len(fetched_pages[page])
             if on_page:
@@ -1823,6 +1832,11 @@ def run_sync(
             )
             set_metadata("last_sync_recovered_at", finished)
         else:
+            if sync_state["search_end_page"] is not None:
+                sync_state["notice"] = (
+                    "Reached the end of JNovels search results "
+                    f"at page {sync_state['search_end_page']}."
+                )
             set_metadata("last_sync_at", finished)
             set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
             set_metadata("last_detail_errors", str(sync_state["detail_errors"]))

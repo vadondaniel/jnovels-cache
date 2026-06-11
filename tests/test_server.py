@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -1024,6 +1025,45 @@ class SyncTests(unittest.TestCase):
     def tearDown(self):
         self.db_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_search_page_404_after_first_page_is_end_of_results(self):
+        error = server.urllib.error.HTTPError(
+            server.search_url(907),
+            404,
+            "Not Found",
+            Message(),
+            None,
+        )
+        with patch.object(server.urllib.request, "urlopen", side_effect=error):
+            self.assertEqual(server.fetch_page(907), [])
+
+    def test_search_page_404_on_first_page_is_still_an_error(self):
+        error = server.urllib.error.HTTPError(
+            server.search_url(1),
+            404,
+            "Not Found",
+            Message(),
+            None,
+        )
+        with (
+            patch.object(server.urllib.request, "urlopen", side_effect=error),
+            self.assertRaises(server.urllib.error.HTTPError),
+        ):
+            server.fetch_page(1)
+
+    def test_sync_finishes_cleanly_at_end_of_search_pages(self):
+        with (
+            patch.object(server, "fetch_page", return_value=[]),
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(907, 1, 0.5, "manual")
+
+        self.assertIsNone(server.sync_state["error"])
+        self.assertEqual(server.sync_state["search_end_page"], 907)
+        self.assertEqual(
+            server.sync_state["notice"],
+            "Reached the end of JNovels search results at page 907.",
+        )
 
     def test_start_sync_thread_marks_sync_running_before_worker_starts(self):
         with patch.object(server.threading, "Thread") as thread_class:
