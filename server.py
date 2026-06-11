@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import hashlib
 import json
 import re
 import sqlite3
@@ -2170,6 +2171,47 @@ def is_cached_book_url(url: str) -> bool:
         ).fetchone() is not None
 
 
+def cache_content_signature() -> str:
+    digest = hashlib.sha256()
+    with connect_db() as connection:
+        book_rows = connection.execute(
+            """
+            SELECT title, url, image_url, published_at, entry_type,
+                   original_post_url, download_url, associated_names,
+                   genres, synopsis, source_order
+            FROM books
+            ORDER BY url
+            """
+        )
+        for row in book_rows:
+            digest.update(
+                json.dumps(
+                    list(row),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+
+        volume_rows = connection.execute(
+            """
+            SELECT series_url, label, download_url, position, release_group
+            FROM series_volumes
+            ORDER BY series_url, position, download_url
+            """
+        )
+        for row in volume_rows:
+            digest.update(
+                json.dumps(
+                    list(row),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
+            digest.update(b"\n")
+    return digest.hexdigest()
+
+
 sync_lock = threading.Lock()
 auto_sync_lock = threading.Lock()
 last_auto_sync_started: float | None = None
@@ -2183,6 +2225,7 @@ sync_state: dict[str, Any] = {
     "pages_completed": 0,
     "items_seen": 0,
     "new_items": 0,
+    "cache_changed": False,
     "details_completed": 0,
     "details_total": 0,
     "detail_errors": 0,
@@ -2218,6 +2261,7 @@ def set_sync_started(
             "pages_completed": 0,
             "items_seen": 0,
             "new_items": 0,
+            "cache_changed": False,
             "details_completed": 0,
             "details_total": 0,
             "detail_errors": 0,
@@ -2414,8 +2458,10 @@ def run_sync(
     if not lock_acquired and not sync_lock.acquire(blocking=False):
         return
 
+    initial_cache_signature: str | None = None
     try:
         set_sync_started(start_page, max_pages, delay, mode)
+        initial_cache_signature = cache_content_signature()
         checkpoint: dict[str, Any] = {
             "version": 1,
             "status": "active",
@@ -2574,6 +2620,9 @@ def run_sync(
                     save_sync_checkpoint(checkpoint)
 
         finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        sync_state["cache_changed"] = (
+            cache_content_signature() != initial_cache_signature
+        )
         sync_state["finished_at"] = finished
         sync_state["phase"] = None
         sync_state["phase_started_at"] = None
@@ -2598,6 +2647,10 @@ def run_sync(
             delete_metadata("last_sync_interrupted_at")
         clear_sync_checkpoint()
     except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        if initial_cache_signature is not None:
+            sync_state["cache_changed"] = (
+                cache_content_signature() != initial_cache_signature
+            )
         sync_state["error"] = str(exc)
         sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["phase"] = None

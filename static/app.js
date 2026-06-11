@@ -684,8 +684,13 @@ async function loadStatus() {
       clearTimeout(state.pollTimer);
       state.pollTimer = setTimeout(loadStatus, 850);
     } else if (wasRunning) {
-      await loadBooks();
-      showToast(payload.sync.error ? "Sync failed." : "Cache updated.", Boolean(payload.sync.error));
+      if (payload.sync.cache_changed) await loadBooks();
+      const message = payload.sync.error
+        ? "Sync failed."
+        : payload.sync.cache_changed
+          ? "Cache updated."
+          : "No changes found.";
+      showToast(message, Boolean(payload.sync.error));
     }
   } catch (error) {
     showToast(error.message, true);

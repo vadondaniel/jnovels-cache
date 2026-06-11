@@ -918,6 +918,39 @@ class DatabaseTests(unittest.TestCase):
             [latest.url, second.url, first.url],
         )
 
+    def test_cache_signature_ignores_maintenance_timestamps(self):
+        book = server.Book("Example", "https://example/book", None, "2026-06-09")
+        server.upsert_books([book], source_page=1)
+        original = server.cache_content_signature()
+
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET cached_at = '2030-01-01T00:00:00+00:00',
+                    last_seen_at = '2030-01-01T00:00:00+00:00',
+                    detail_cached_at = '2030-01-01T00:00:00+00:00',
+                    detail_last_attempt_at = '2030-01-01T00:00:00+00:00'
+                WHERE url = ?
+                """,
+                (book.url,),
+            )
+
+        self.assertEqual(server.cache_content_signature(), original)
+
+    def test_cache_signature_changes_with_visible_content(self):
+        book = server.Book("Example", "https://example/book", None, "2026-06-09")
+        server.upsert_books([book], source_page=1)
+        original = server.cache_content_signature()
+
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE books SET title = 'Updated example' WHERE url = ?",
+                (book.url,),
+            )
+
+        self.assertNotEqual(server.cache_content_signature(), original)
+
     def test_keeps_pdf_only_entry_without_epub_counterpart(self):
         pdf = server.Book(
             "Example Story Volume 1 PDF",
