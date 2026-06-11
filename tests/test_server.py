@@ -866,6 +866,7 @@ class DatabaseTests(unittest.TestCase):
                 "failed_retries": 1,
                 "paused_retries": 1,
                 "stale_series": 0,
+                "refreshable_series": 0,
             },
         )
         failures = server.list_repair_failures()
@@ -889,6 +890,21 @@ class DatabaseTests(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["detail_attempts"], 0)
         self.assertIsNone(row["detail_last_error"])
+
+    def test_health_counts_series_missing_metadata_as_refreshable(self):
+        series_url = "https://jnovels.com/example-light-novel-epub/"
+        server.upsert_books(
+            [server.Book("Example Light Novel Epub", series_url, None, None)]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        health = server.get_cache_health()
+
+        self.assertEqual(health["stale_series"], 0)
+        self.assertEqual(health["refreshable_series"], 1)
 
     def test_finds_series_stale_by_age_or_newer_cached_volume(self):
         old_series = "https://example/old-series"

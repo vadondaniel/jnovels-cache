@@ -8,6 +8,7 @@ const state = {
   total: 0,
   loadSequence: 0,
   health: {},
+  cacheCount: 0,
   filter: "all",
   syncNotice: null,
 };
@@ -485,6 +486,8 @@ function updateStatus(payload) {
   const sync = payload.sync;
   const health = payload.health || {};
   state.health = health;
+  state.cacheCount = payload.count || 0;
+  updateSyncModes();
   if (sync.notice && sync.notice !== state.syncNotice) {
     state.syncNotice = sync.notice;
     showToast(sync.notice);
@@ -494,11 +497,18 @@ function updateStatus(payload) {
   elements.syncToggle.disabled = sync.running;
   elements.syncToggle.classList.toggle("is-running", sync.running);
   elements.cacheHealth.hidden =
-    sync.running || (!health.pending_details && !health.stale_series);
+    sync.running || (!health.pending_details && !health.refreshable_series);
+  elements.repairAll.hidden = !health.pending_details;
+  elements.refreshSeries.hidden = !health.refreshable_series;
   const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
   const healthParts = [];
   if (health.pending_details) healthParts.push(`${health.pending_details} pending${failedText}`);
   if (health.stale_series) healthParts.push(`${health.stale_series} stale series`);
+  const metadataBackfill = Math.max(
+    (health.refreshable_series || 0) - (health.stale_series || 0),
+    0,
+  );
+  if (metadataBackfill) healthParts.push(`${metadataBackfill} series missing info`);
   elements.cacheHealth.textContent = healthParts.join(" · ");
   elements.cacheHealth.title = health.paused_retries
     ? `${health.paused_retries} entries paused after repeated failures. Open repair options.`
@@ -550,6 +560,38 @@ function updateStatus(payload) {
   }
 }
 
+function updateSyncModes(preferredMode = null) {
+  const currentMode = preferredMode || elements.syncMode.value;
+  const pending = state.health.pending_details || 0;
+  const refreshableSeries = state.health.refreshable_series || 0;
+  const modes = state.cacheCount
+    ? [
+        ["catchup", "Check for new entries"],
+        ["extend", "Add older entries"],
+        ...(pending ? [["repair", `Repair incomplete entries (${pending})`]] : []),
+        ...(refreshableSeries
+          ? [["series_refresh", `Refresh series data (${refreshableSeries})`]]
+          : []),
+        ["manual", "Scan specific pages"],
+      ]
+    : [
+        ["catchup", "Build initial cache"],
+        ["manual", "Scan specific pages"],
+      ];
+
+  elements.syncMode.replaceChildren(
+    ...modes.map(([value, label]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      return option;
+    }),
+  );
+  const availableModes = new Set(modes.map(([value]) => value));
+  elements.syncMode.value = availableModes.has(currentMode) ? currentMode : modes[0][0];
+  updateSyncMode();
+}
+
 function updateSyncMode() {
   const mode = elements.syncMode.value;
   elements.startPageField.hidden = mode !== "manual";
@@ -558,7 +600,9 @@ function updateSyncMode() {
     elements.maxPages.value = "20";
     elements.maxPages.max = "200";
     elements.syncHelp.textContent =
-      "Checks newest entries first and stops after reaching entries already in the cache.";
+      state.cacheCount
+        ? "Checks newest entries first and stops after reaching entries already in the cache."
+        : "Starts the cache from the newest entries and continues up to the page limit.";
   } else if (mode === "extend") {
     elements.maxPagesLabel.textContent = "Pages to add";
     elements.maxPages.value = "10";
@@ -697,14 +741,12 @@ elements.repairDialog.addEventListener("click", (event) => {
 });
 elements.repairAll.addEventListener("click", () => {
   elements.repairDialog.close();
-  elements.syncMode.value = "repair";
-  updateSyncMode();
+  updateSyncModes("repair");
   openSyncOptions();
 });
 elements.refreshSeries.addEventListener("click", () => {
   elements.repairDialog.close();
-  elements.syncMode.value = "series_refresh";
-  updateSyncMode();
+  updateSyncModes("series_refresh");
   openSyncOptions();
 });
 elements.syncClose.addEventListener("click", () => elements.syncDialog.close());
@@ -816,7 +858,7 @@ window.addEventListener("popstate", () => {
 });
 
 applyViewFromUrl();
-updateSyncMode();
+updateSyncModes();
 Promise.all([loadBooks({ historyMode: "replace" }), loadStatus()])
   .then(() => startPageLoadCatchup().catch((error) => {
     console.warn("Automatic catch-up sync could not start:", error);

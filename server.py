@@ -1291,11 +1291,21 @@ def get_cache_health(
             """
         ).fetchone()[0]
         stale_series = count_stale_series(connection=active_connection)
+        refreshable_series = active_connection.execute(
+            f"""
+            SELECT COUNT(*)
+            FROM series_status AS ss
+            WHERE ss.metadata_checked_at IS NULL
+               OR {stale_series_where_clause()}
+            """,
+            (series_stale_cutoff(),),
+        ).fetchone()[0]
         return {
             "pending_details": pending,
             "failed_retries": failed,
             "paused_retries": paused,
             "stale_series": stale_series,
+            "refreshable_series": refreshable_series,
         }
 
     if connection is not None:
