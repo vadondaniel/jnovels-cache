@@ -278,6 +278,39 @@ class ParserTests(unittest.TestCase):
             ("How a Realist Hero Rebuilt the Kingdom", "Vol. 21"),
         )
 
+    def test_compacts_split_volume_qualifiers_in_badges(self):
+        cases = [
+            ("Rebuild World Volume 6 Part 1 Epub", "Vol. 6.1"),
+            ("The Misfit of Demon King Academy Volume 10 Act 2 Epub", "Vol. 10.2"),
+            (
+                "Min-Maxing My TRPG Build in Another World Volume 9 Canto II Epub",
+                "Vol. 9.2",
+            ),
+            (
+                "Agents of the Four Seasons Volume 6: Dance of Autumn, Part I Epub",
+                "Vol. 6.1",
+            ),
+            ("Example Volume 4 II Epub", "Vol. 4.2"),
+            ("Death’s Daughter and the Ebony Blade Volume 7 Finale Epub", "Vol. 7 Finale"),
+        ]
+
+        for title, expected_badge in cases:
+            with self.subTest(title=title):
+                _, badge = server.parse_book_identity(
+                    title,
+                    "https://jnovels.com/example-volume-1-epub/",
+                )
+                self.assertEqual(badge, expected_badge)
+
+    def test_parses_format_token_before_canto_qualifier(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "Min-Maxing My TRPG Build in Another World Volume 4 Epub Canto II",
+                "https://jnovels.com/min-maxing-volume-4-canto-2-epub/",
+            ),
+            ("Min-Maxing My TRPG Build in Another World", "Vol. 4.2"),
+        )
+
     def test_removes_legacy_format_tags_from_display_identity(self):
         self.assertEqual(
             server.parse_book_identity(

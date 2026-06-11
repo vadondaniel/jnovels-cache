@@ -745,6 +745,48 @@ def normalize_volume_number(value: str) -> str:
     return f"{normalized_whole}.{fraction}" if separator else normalized_whole
 
 
+def roman_to_integer(value: str) -> int | None:
+    values = {"I": 1, "V": 5, "X": 10}
+    total = 0
+    previous = 0
+    for character in reversed(value.upper()):
+        current = values.get(character)
+        if current is None:
+            return None
+        if current < previous:
+            total -= current
+        else:
+            total += current
+            previous = current
+    return total or None
+
+
+def compact_volume_badge(number: str, suffix: str) -> str:
+    normalized_number = normalize_volume_number(number)
+    qualifier = re.search(
+        r"\b(Part|Act|Canto)\s+([0-9]+|[IVX]+)\b",
+        suffix,
+        re.IGNORECASE,
+    )
+    if qualifier:
+        part = qualifier.group(2)
+        part_number = (
+            normalize_volume_number(part)
+            if part.isdecimal()
+            else str(roman_to_integer(part) or part.upper())
+        )
+        return f"Vol. {normalized_number}.{part_number}"
+    roman_half = re.match(r"\s+([IVX]+)\b", suffix, re.IGNORECASE)
+    if roman_half:
+        part_number = roman_to_integer(roman_half.group(1))
+        if part_number:
+            return f"Vol. {normalized_number}.{part_number}"
+    named = re.search(r"\b(Exordium|Finale)\b", suffix, re.IGNORECASE)
+    if named:
+        return f"Vol. {normalized_number} {named.group(1).title()}"
+    return f"Vol. {normalized_number}"
+
+
 def normalize_legacy_title_case(value: str) -> str:
     letters = [character for character in value if character.isalpha()]
     if not letters or any(character.islower() for character in letters):
@@ -831,19 +873,25 @@ def normalize_display_title(value: str) -> str:
 def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
     cleaned = normalize_display_title(title)
     cleaned = re.sub(r"\s+Epub$", "", cleaned, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(
+        r"\s+Epub(?=\s+(?:Canto|Part|Act)\s+(?:[0-9]+|[IVX]+)\s*$)",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     match = re.search(
         r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
-        r"(?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
-        r"(?:\s*[:\-–—]\s+.+?)?"
+        r"((?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
+        r"(?:\s*[:\-–—]\s+.+?)?)"
         r"(?:\s+Light\s+Novel)?(?:\s+(PDF))?$",
         cleaned,
         flags=re.IGNORECASE,
     )
     if match:
         series_title = cleaned[: match.start()].rstrip(" .…")
-        if match.group(2):
+        if match.group(3):
             series_title = f"{series_title} PDF"
-        return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
+        return series_title, compact_volume_badge(match.group(1), match.group(2))
 
     slug_match = re.search(
         r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-(?:epub|pdf)/?$",
