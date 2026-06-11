@@ -2568,6 +2568,29 @@ def count_books(query: str, entry_filter: str = "all") -> int:
         ).fetchone()[0]
 
 
+def count_book_filters() -> dict[str, int]:
+    with connect_db() as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS all_count,
+                   SUM(entry_type = 'series') AS series_count,
+                   SUM(entry_type = 'volume') AS volume_count,
+                   SUM(
+                       detail_cached_at IS NULL
+                       OR entry_type IS NULL
+                       OR download_url IS NULL
+                   ) AS pending_count
+            FROM books
+            """
+        ).fetchone()
+    return {
+        "all": row["all_count"] or 0,
+        "series": row["series_count"] or 0,
+        "volumes": row["volume_count"] or 0,
+        "pending": row["pending_count"] or 0,
+    }
+
+
 def list_books(
     query: str,
     sort: str,
@@ -2744,6 +2767,9 @@ class AppHandler(SimpleHTTPRequestHandler):
             entry_filter = params.get("filter", ["all"])[0].strip().casefold()
             if entry_filter not in {"all", "series", "volumes", "pending"}:
                 entry_filter = "all"
+            filter_counts = count_book_filters()
+            if entry_filter != "all" and not filter_counts[entry_filter]:
+                entry_filter = "all"
             page = parse_positive_int(params.get("page", ["1"])[0], 1)
             page_size = min(
                 parse_positive_int(
@@ -2770,6 +2796,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                     "page_size": page_size,
                     "pages": pages,
                     "filter": entry_filter,
+                    "filter_counts": filter_counts,
                 }
             )
             return

@@ -1072,6 +1072,15 @@ class DatabaseTests(unittest.TestCase):
             [book["url"] for book in server.list_books("", "title_asc", entry_filter="pending")],
             [pending.url],
         )
+        self.assertEqual(
+            server.count_book_filters(),
+            {
+                "all": 3,
+                "series": 1,
+                "volumes": 1,
+                "pending": 1,
+            },
+        )
 
     def test_series_display_title_uses_its_latest_volume_title(self):
         series = server.Book(

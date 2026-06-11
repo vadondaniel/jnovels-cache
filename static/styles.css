@@ -294,6 +294,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
   border-radius: 6px;
 }
 
+.entry-filters[hidden],
+.entry-filters button[hidden] {
+  display: none;
+}
+
 .entry-filters button {
   min-height: 28px;
   padding: 0 10px;

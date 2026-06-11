@@ -10,6 +10,7 @@ const state = {
   health: {},
   cacheCount: 0,
   filter: "all",
+  filterCounts: {},
   syncNotice: null,
 };
 
@@ -24,6 +25,7 @@ const elements = {
   count: document.querySelector("#result-count"),
   lastSync: document.querySelector("#last-sync"),
   filterButtons: [...document.querySelectorAll("[data-filter]")],
+  entryFilters: document.querySelector("#entry-filters"),
   cacheHealth: document.querySelector("#cache-health"),
   syncStatus: document.querySelector("#sync-status"),
   syncStatusLabel: document.querySelector("#sync-status-label"),
@@ -80,9 +82,14 @@ const elements = {
 };
 
 function updateFilterButtons() {
+  let availableCategoryCount = 0;
   elements.filterButtons.forEach((button) => {
+    const filter = button.dataset.filter;
+    button.hidden = filter !== "all" && !(state.filterCounts[filter] || 0);
+    if (filter !== "all" && !button.hidden) availableCategoryCount += 1;
     button.setAttribute("aria-pressed", String(button.dataset.filter === state.filter));
   });
+  elements.entryFilters.hidden = availableCategoryCount < 2;
 }
 
 function applyViewFromUrl() {
@@ -445,6 +452,11 @@ async function loadBooks({ scroll = false, historyMode = null } = {}) {
   });
   const payload = await request(`/api/books?${params}`);
   if (sequence !== state.loadSequence) return;
+  state.filterCounts = payload.filter_counts || {};
+  if (!(state.filterCounts[state.filter] || 0) && state.filter !== "all") {
+    state.filter = "all";
+  }
+  updateFilterButtons();
   state.books = payload.books;
   renderBooks(state.books, payload.count);
   renderPagination(payload);
