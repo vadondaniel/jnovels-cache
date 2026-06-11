@@ -54,6 +54,54 @@ GROUPED_SERIES_HTML = """
 </article>
 """
 
+LEGACY_FORMAT_SERIES_HTML = """
+<article>
+  <div class="post-content clear">
+    <div>PDF LIGHT</div>
+    <ol>
+      <li>VOLUME 01 <a href="https://files.example/pdf-light-1">Download</a></li>
+      <li>VOLUME 02 <a href="https://files.example/pdf-light-2">Download</a></li>
+    </ol>
+    <div>PDF DARK</div>
+    <ol>
+      <li>VOLUME 01 <a href="https://files.example/pdf-dark-1">Download</a></li>
+    </ol>
+    <div>EPUB</div>
+    <ol>
+      <li>VOLUME 01 <a href="https://files.example/epub-1">Download</a></li>
+      <li>VOLUME 02 <a href="https://files.example/epub-2">Download</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+LEGACY_WEBNOVEL_HTML = """
+<article>
+  <div class="post-content clear">
+    <div>PDF</div>
+    <ol>
+      <li>Example Webnovel (completed) <a href="https://files.example/pdf">DOWNLOAD</a></li>
+    </ol>
+    <div>EPUB</div>
+    <ol>
+      <li>Example Webnovel (completed) <a href="https://files.example/epub">DOWNLOAD</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+LEGACY_PARAGRAPH_CATALOG_HTML = """
+<article>
+  <div class="post-content clear">
+    <p><strong>Download Link – EPUB File</strong></p>
+    <p>Volume 1 – <a href="https://files.example/epub-1">Enrollment Chapter</a></p>
+    <p>Volume 2 – <a href="https://files.example/epub-2">Competition Chapter</a></p>
+    <p><strong>Download Link – PDF</strong></p>
+    <p>Volume 1 – <a href="https://files.example/pdf-1">Enrollment Chapter</a></p>
+  </div>
+</article>
+"""
+
 NESTED_SERIES_HTML = """
 <article>
   <div class="post-content clear">
@@ -229,6 +277,82 @@ class ParserTests(unittest.TestCase):
                 ("Volume 1", "Official translation"),
                 ("Volume 1", "Fan translation"),
             ],
+        )
+
+    def test_preserves_legacy_pdf_and_epub_format_groups(self):
+        parser = server.PostDetailsParser("https://jnovels.com/legacy-formats/")
+        parser.feed(LEGACY_FORMAT_SERIES_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            [(volume.release_group, volume.label) for volume in details.volumes],
+            [
+                ("PDF (light)", "Volume 1"),
+                ("PDF (light)", "Volume 2"),
+                ("PDF (dark)", "Volume 1"),
+                ("EPUB", "Volume 1"),
+                ("EPUB", "Volume 2"),
+            ],
+        )
+        self.assertEqual(details.download_url, "https://files.example/epub-1")
+
+    def test_extracts_completed_webnovel_downloads_by_format(self):
+        parser = server.PostDetailsParser("https://jnovels.com/webnovelpdfepub-example/")
+        parser.feed(LEGACY_WEBNOVEL_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in details.volumes
+            ],
+            [
+                ("PDF", "Complete edition", "https://files.example/pdf"),
+                ("EPUB", "Complete edition", "https://files.example/epub"),
+            ],
+        )
+        self.assertEqual(details.download_url, "https://files.example/epub")
+
+    def test_extracts_legacy_paragraph_catalogs(self):
+        parser = server.PostDetailsParser("https://jnovels.com/legacy-paragraphs/")
+        parser.feed(LEGACY_PARAGRAPH_CATALOG_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in details.volumes
+            ],
+            [
+                ("EPUB", "Volume 1", "https://files.example/epub-1"),
+                ("EPUB", "Volume 2", "https://files.example/epub-2"),
+                ("PDF", "Volume 1", "https://files.example/pdf-1"),
+            ],
+        )
+        self.assertEqual(details.download_url, "https://files.example/epub-1")
+
+    def test_ignores_self_referential_original_post_link(self):
+        post_url = "https://jnovels.com/example-volume-2-epub/"
+        parser = server.PostDetailsParser(post_url)
+        parser.feed(
+            """
+            <article><div class="post-content clear">
+              <p><a href="/example-volume-2-epub/">Refer to original post</a></p>
+              <p><a href="https://files.example/v2">Volume 02</a></p>
+            </div></article>
+            """
+        )
+
+        details = parser.details()
+
+        self.assertEqual(details.entry_type, "series")
+        self.assertIsNone(details.original_post_url)
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in details.volumes],
+            [("Volume 2", "https://files.example/v2")],
         )
 
     def test_extracts_each_volume_from_nested_lists(self):
@@ -641,6 +765,27 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["published_at"], "2026-06-09")
         self.assertEqual(saved["post_url"], volume.url)
 
+    def test_series_catalog_uses_series_post_date_for_its_first_download(self):
+        series_url = "https://example/series"
+        download_url = "https://files.example/v1"
+        server.upsert_books(
+            [server.Book("Example Series", series_url, None, "2022-08-15")]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                download_url,
+                [server.SeriesVolume("Volume 1", download_url, 0)],
+            ),
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+
+        self.assertEqual(saved["published_at"], "2022-08-15")
+        self.assertEqual(saved["post_url"], series_url)
+
     def test_catalog_dates_match_series_url_variants_by_identity_and_label(self):
         catalog_url = "https://jnovels.com/example-series-light-novel-epub/"
         volume = server.Book(
@@ -906,6 +1051,45 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(health["stale_series"], 0)
         self.assertEqual(health["refreshable_series"], 1)
+
+    def test_legacy_reparse_migration_normalizes_and_queues_old_formats(self):
+        url = "https://jnovels.com/webnovelpdfepub-example/"
+        server.upsert_books([server.Book("[WEBNOVEL][PDF][EPUB] Example", url, None, None)])
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = url
+                WHERE url = ?
+                """,
+                (url,),
+            )
+            connection.execute(
+                """
+                INSERT INTO series_status (series_url, checked_at, metadata_checked_at)
+                VALUES (?, ?, ?)
+                """,
+                (url, "2026-06-01T00:00:00+00:00", "2026-06-01T00:00:00+00:00"),
+            )
+            connection.execute(
+                "DELETE FROM metadata WHERE key = ?",
+                (server.LEGACY_REPARSE_KEY,),
+            )
+
+        self.assertGreaterEqual(server.prepare_legacy_reparse(), 2)
+
+        with server.connect_db() as connection:
+            book = connection.execute(
+                "SELECT entry_type, original_post_url FROM books WHERE url = ?",
+                (url,),
+            ).fetchone()
+            status = connection.execute(
+                "SELECT metadata_checked_at FROM series_status WHERE series_url = ?",
+                (url,),
+            ).fetchone()
+        self.assertEqual(book["entry_type"], "series")
+        self.assertIsNone(book["original_post_url"])
+        self.assertIsNone(status["metadata_checked_at"])
 
     def test_finds_series_stale_by_age_or_newer_cached_volume(self):
         old_series = "https://example/old-series"

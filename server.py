@@ -34,6 +34,7 @@ AUTO_SERIES_REFRESH_LIMIT = 5
 AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
 SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
+LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 EXCLUDED_SEARCH_PATHS = {"/light-novel-epub-jp/"}
 
 _catalog_index_lock = threading.Lock()
@@ -95,6 +96,7 @@ class PostDetailsParser(HTMLParser):
         self._anchor_href: str | None = None
         self._anchor_parts: list[str] = []
         self._list_items: list[dict[str, Any]] = []
+        self._paragraph_item: dict[str, Any] | None = None
         self._release_group: str | None = None
         self._volume_urls: set[str] = set()
         self._volume_keys: dict[tuple[int, str, str], int] = {}
@@ -140,6 +142,12 @@ class PostDetailsParser(HTMLParser):
                 self._list_index += 1
                 self._current_list_index = self._list_index
             self._list_depth += 1
+        if tag == "p" and self._content_depth and not self._list_items:
+            self._paragraph_item = {
+                "parts": [],
+                "download_url": None,
+                "source_list": 0,
+            }
         if tag == "a" and self._content_depth:
             self._anchor_href = attributes.get("href")
             self._anchor_parts = []
@@ -159,14 +167,15 @@ class PostDetailsParser(HTMLParser):
             self._anchor_parts = []
         elif tag == "li" and self._content_depth and self._list_items:
             self._finish_list_item(self._list_items.pop())
+        elif tag == "p" and self._content_depth and self._paragraph_item:
+            self._finish_list_item(self._paragraph_item)
+            self._paragraph_item = None
         elif tag in {"h4", "h5", "h6"} and self._in_associated_heading:
             self._in_associated_heading = False
         elif tag in {"ol", "ul"} and self._content_depth and self._list_depth:
             self._list_depth -= 1
             if self._list_depth == 0:
                 self._current_list_index = 0
-        elif tag == "p" and self._description_depth and not self._associated_depth:
-            self._description_parts.append("\n\n")
         elif tag == "div":
             if self._associated_depth:
                 self._associated_depth -= 1
@@ -174,6 +183,8 @@ class PostDetailsParser(HTMLParser):
                 self._description_depth -= 1
             if self._content_depth:
                 self._content_depth -= 1
+        if tag == "p" and self._description_depth and not self._associated_depth:
+            self._description_parts.append("\n\n")
 
     def handle_data(self, data: str) -> None:
         normalized = " ".join(data.split()).casefold()
@@ -188,10 +199,30 @@ class PostDetailsParser(HTMLParser):
                 normalized,
             ):
                 self._release_group = "Fan translation"
+            elif re.fullmatch(r"pdf\s+light", normalized):
+                self._release_group = "PDF (light)"
+            elif re.fullmatch(r"pdf\s+dark", normalized):
+                self._release_group = "PDF (dark)"
+            elif re.fullmatch(r"pdf", normalized):
+                self._release_group = "PDF"
+            elif re.fullmatch(r"epub", normalized):
+                self._release_group = "EPUB"
+            elif re.fullmatch(
+                r"download link\s*[-–—]\s*epub(?: file)?",
+                normalized,
+            ):
+                self._release_group = "EPUB"
+            elif re.fullmatch(
+                r"download link\s*[-–—]\s*pdf(?: file)?",
+                normalized,
+            ):
+                self._release_group = "PDF"
         if self._anchor_href:
             self._anchor_parts.append(data)
         if self._list_items:
             self._list_items[-1]["parts"].append(data)
+        elif self._paragraph_item:
+            self._paragraph_item["parts"].append(data)
         if self._associated_depth:
             self._associated_parts.append(data)
         elif self._description_depth and not self._in_associated_heading:
@@ -203,7 +234,8 @@ class PostDetailsParser(HTMLParser):
         normalized = text.casefold()
 
         if re.fullmatch(r"refer to (?:the )?(?:original|main) post", normalized):
-            self.original_post_url = href
+            if canonical_page_url(href) != canonical_page_url(self.post_url):
+                self.original_post_url = href
             return
 
         parsed_href = urllib.parse.urlparse(href)
@@ -231,6 +263,8 @@ class PostDetailsParser(HTMLParser):
         catalog_label = extract_catalog_label(text)
         if self._list_items and ("download" in normalized or catalog_label):
             self._list_items[-1]["download_url"] = href
+        elif self._paragraph_item:
+            self._paragraph_item["download_url"] = href
         if not self.download_url and (
             "download" in normalized or catalog_label
         ):
@@ -244,6 +278,8 @@ class PostDetailsParser(HTMLParser):
             return
         text = " ".join("".join(item["parts"]).split())
         label = extract_catalog_label(text) or extract_trailing_catalog_label(text)
+        if not label and self._release_group in {"PDF", "EPUB"}:
+            label = "Complete edition"
         if not label:
             return
         self._append_volume(label, download_url, item["source_list"])
@@ -300,10 +336,21 @@ class PostDetailsParser(HTMLParser):
                 if volume.source_list in {0, primary_list}
                 or volume.release_group is not None
             ]
+        download_url = self.download_url
+        epub_download = next(
+            (
+                volume.download_url
+                for volume in volumes
+                if volume.release_group == "EPUB"
+            ),
+            None,
+        )
+        if epub_download:
+            download_url = epub_download
         return PostDetails(
             entry_type,
             self.original_post_url,
-            self.download_url,
+            download_url,
             volumes if entry_type == "series" else [],
             associated_names,
             self._genres,
@@ -417,6 +464,14 @@ def is_external_http_url(value: str) -> bool:
         "jnovels.com",
         "www.jnovels.com",
     }
+
+
+def canonical_page_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value)
+    path = parsed.path.rstrip("/") or "/"
+    return urllib.parse.urlunsplit(
+        (parsed.scheme.casefold(), parsed.netloc.casefold(), path, "", "")
+    )
 
 
 def is_volume_label(value: str) -> bool:
@@ -821,6 +876,7 @@ def initialize_db() -> None:
             [(urllib.parse.urljoin(BASE_URL, path),) for path in EXCLUDED_SEARCH_PATHS],
         )
     build_missing_fallback_catalogs()
+    prepare_legacy_reparse()
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -884,7 +940,50 @@ def get_public_metadata(
 ) -> dict[str, str]:
     metadata = get_metadata(connection=connection)
     metadata.pop(SYNC_CHECKPOINT_KEY, None)
+    metadata.pop(LEGACY_REPARSE_KEY, None)
     return metadata
+
+
+def prepare_legacy_reparse() -> int:
+    with connect_db() as connection:
+        if connection.execute(
+            "SELECT 1 FROM metadata WHERE key = ?",
+            (LEGACY_REPARSE_KEY,),
+        ).fetchone():
+            return 0
+
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE books
+            SET entry_type = 'series',
+                original_post_url = NULL
+            WHERE original_post_url = url
+            """
+        )
+        connection.execute(
+            """
+            UPDATE series_status
+            SET metadata_checked_at = NULL
+            WHERE series_url IN (
+                SELECT url
+                FROM books
+                WHERE entry_type = 'series'
+                  AND (
+                      lower(title) LIKE '%webnovel%'
+                      OR lower(title) LIKE '%[pdf]%'
+                      OR lower(title) LIKE '%[epub]%'
+                      OR lower(url) LIKE '%pdfepub%'
+                  )
+            )
+            """
+        )
+        changes = connection.total_changes - before
+        connection.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            (LEGACY_REPARSE_KEY, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+    return changes
 
 
 def save_sync_checkpoint(checkpoint: dict[str, Any]) -> None:
@@ -1992,6 +2091,15 @@ def list_books(
         book["volume_label"] = volume_label
         book["series_url"] = series_url
         book["volume_count"] = volume_counts.get(series_url or "", 0)
+        title_and_url = f"{book['title']} {book['url']}".casefold()
+        book["catalog_kind"] = (
+            "downloads"
+            if "webnovel" in title_and_url
+            or "[pdf]" in title_and_url
+            or "[epub]" in title_and_url
+            or "pdfepub" in title_and_url
+            else "volumes"
+        )
         book["is_standalone"] = (
             book["entry_type"] == "series" and book["volume_count"] == 1
         )
@@ -2018,9 +2126,10 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         ).fetchone()
         book_rows = connection.execute(
             """
-            SELECT title, url, download_url, published_at
+            SELECT title, url, download_url, published_at, entry_type
             FROM books
-            WHERE entry_type = 'volume'
+            WHERE download_url IS NOT NULL
+            ORDER BY entry_type = 'volume' DESC, published_at DESC
             """
         ).fetchall()
 
@@ -2032,7 +2141,7 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     exact_downloads: dict[str, sqlite3.Row] = {}
     for book in book_rows:
         if book["download_url"]:
-            exact_downloads[book["download_url"]] = book
+            exact_downloads.setdefault(book["download_url"], book)
         if series_identity_key(book["title"], book["url"]) != target_key:
             continue
         label = extract_catalog_label(book["title"])

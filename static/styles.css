@@ -922,6 +922,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
   border-bottom: 1px solid var(--line);
 }
 
+.catalog-dialog__header > div {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .catalog-dialog__header .eyebrow {
   margin-bottom: 8px;
   color: var(--gold-dark);
@@ -939,8 +944,10 @@ button, a { -webkit-tap-highlight-color: transparent; }
 }
 
 .catalog-dialog__close {
+  flex: 0 0 36px;
   width: 36px;
   height: 36px;
+  padding: 0;
   border: 1px solid var(--line);
   border-radius: 50%;
   cursor: pointer;

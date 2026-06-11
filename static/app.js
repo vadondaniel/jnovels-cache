@@ -60,6 +60,7 @@ const elements = {
   template: document.querySelector("#book-template"),
   toast: document.querySelector("#toast"),
   catalogDialog: document.querySelector("#catalog-dialog"),
+  catalogEyebrow: document.querySelector("#catalog-eyebrow"),
   catalogTitle: document.querySelector("#catalog-title"),
   catalogCount: document.querySelector("#catalog-count"),
   catalogList: document.querySelector("#catalog-list"),
@@ -173,7 +174,8 @@ function renderBooks(books, total) {
       seriesLink.hidden = true;
     }
     if (book.volume_count > 1) {
-      catalogButton.textContent = `Volumes · ${book.volume_count}`;
+      const catalogName = book.catalog_kind === "downloads" ? "Downloads" : "Volumes";
+      catalogButton.textContent = `${catalogName} · ${book.volume_count}`;
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
@@ -190,8 +192,9 @@ function renderBooks(books, total) {
     if (book.entry_type === "series" && book.volume_count > 1) {
       coverLink.href = "#";
       titleLink.href = "#";
-      coverLink.setAttribute("aria-label", `Browse cached volumes for ${book.series_title}`);
-      titleLink.title = "Browse cached volumes";
+      const catalogName = book.catalog_kind === "downloads" ? "downloads" : "volumes";
+      coverLink.setAttribute("aria-label", `Browse cached ${catalogName} for ${book.series_title}`);
+      titleLink.title = `Browse cached ${catalogName}`;
       const openBookCatalog = (event) => {
         event.preventDefault();
         openCatalog(book);
@@ -341,7 +344,12 @@ function renderPagination(payload) {
 
 async function openCatalog(book) {
   elements.catalogTitle.textContent = book.series_title;
-  elements.catalogCount.textContent = "Loading volumes...";
+  const isDownloadCatalog = book.catalog_kind === "downloads";
+  const itemName = isDownloadCatalog ? "download" : "volume";
+  elements.catalogEyebrow.textContent = isDownloadCatalog
+    ? "Cached downloads"
+    : "Cached volumes";
+  elements.catalogCount.textContent = `Loading ${itemName}s...`;
   elements.catalogList.replaceChildren();
   const hasDetails = Boolean(
     book.synopsis || book.associated_names.length || book.genres.length,
@@ -355,13 +363,27 @@ async function openCatalog(book) {
   try {
     const payload = await request(`/api/series?${new URLSearchParams({ url: book.series_url })}`);
     elements.catalogCount.textContent =
-      `${payload.count} cached ${payload.count === 1 ? "volume" : "volumes"}`;
+      `${payload.count} cached ${payload.count === 1 ? itemName : `${itemName}s`}`;
     const fragment = document.createDocumentFragment();
     const grouped = new Map();
     payload.volumes.forEach((volume) => {
-      const groupName = volume.release_group || "";
+      let groupName = volume.release_group || "";
+      let displayLabel = volume.label;
+      const partMatch = displayLabel.match(/^Part (\d+) (.+)$/i);
+      if (!groupName && partMatch) {
+        groupName = `Part ${Number(partMatch[1])}`;
+        displayLabel = partMatch[2];
+      } else if (!groupName && /^Short Story Collection /i.test(displayLabel)) {
+        groupName = "Short stories";
+        displayLabel = displayLabel.replace(/^Short Story Collection /i, "");
+      } else if (
+        !groupName
+        && (/^Fanbook(?:\s|$)/i.test(displayLabel) || /^Royal Academy Stories/i.test(displayLabel))
+      ) {
+        groupName = "Related books";
+      }
       if (!grouped.has(groupName)) grouped.set(groupName, []);
-      grouped.get(groupName).push(volume);
+      grouped.get(groupName).push({ ...volume, displayLabel });
     });
     grouped.forEach((volumes, groupName) => {
       const group = document.createElement("section");
@@ -382,7 +404,7 @@ async function openCatalog(book) {
         link.href = volume.download_url;
         link.target = "_blank";
         link.rel = "noopener";
-        label.textContent = volume.label;
+        label.textContent = volume.displayLabel;
         date.textContent = volume.published_at
           ? `Released ${formatDate(volume.published_at)}`
           : "Release date unavailable";
