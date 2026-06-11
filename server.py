@@ -36,6 +36,7 @@ AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
 SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
+LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
 EXCLUDED_SEARCH_PATHS = {
     "/light-novel-epub-jp/",
     "/top-light-novels-to-read/",
@@ -618,36 +619,55 @@ def extract_volume_label(value: str) -> str | None:
         r"|(?:([0-9]+)(?:ST|ND|RD|TH)\s+YEAR)"
         r"|(?:YR\s*([0-9]+))"
         r")?\s*"
-        r"(?:VOLUME|VOLUMES|VOL\.?)\s*([0-9]+(?:\.[0-9]+)?)(\+*)",
+        r"(?:VOLUME|VOLUMES|VOL\.?)\s*"
+        r"(ZERO|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—]\s*[0-9]+(?:\.[0-9]+)?)?)"
+        r"(\+*)",
         value,
         re.IGNORECASE,
     )
     if not match:
         return None
-    number = normalize_volume_number(match.group(5))
+    number = normalize_volume_designator(match.group(5))
     suffix = match.group(6)
     trailing = value[match.end() :]
-    canto_match = re.match(r"\s+(CANTO\s+)?([IVX]+)\b", trailing, re.IGNORECASE)
+    canto_match = re.match(
+        r"\s+(CANTO\s+)?([0-9]+|[IVX]+)\b",
+        trailing,
+        re.IGNORECASE,
+    )
     book_match = re.match(r"\s*\(\s*BOOK\s+([0-9]+)\s*\)", trailing, re.IGNORECASE)
     part_match = re.match(
-        r"\s*(?:[-–—,]\s*)?(PART|ACT)\s*([0-9]+)\b",
+        r"\s*(?:[-–—,]\s*)?(PART|ACT)\s*([0-9]+|[IVX]+)\b",
+        trailing,
+        re.IGNORECASE,
+    )
+    chapter_match = re.match(
+        r"\s*(?:[-–—,:]\s*)?CHAPTER\s*([0-9]+)\b",
         trailing,
         re.IGNORECASE,
     )
     named_half_match = re.match(
-        r"\s+(EXORDIUM|FINALE)\b",
+        r"\s+(EXORDIUM|FINALE|PROLOGUE|AFTERWORD)\b",
         trailing,
         re.IGNORECASE,
     )
     qualifier = ""
     if part_match:
+        part = part_match.group(2)
+        part_number = (
+            normalize_volume_number(part)
+            if part.isdecimal()
+            else str(roman_to_integer(part) or part.upper())
+        )
         qualifier = (
             f" {part_match.group(1).title()} "
-            f"{normalize_volume_number(part_match.group(2))}"
+            f"{part_number}"
         )
     elif canto_match:
         canto_prefix = "Canto " if canto_match.group(1) else ""
         qualifier = f" {canto_prefix}{canto_match.group(2).upper()}"
+    elif chapter_match:
+        qualifier = f" Chapter {normalize_volume_number(chapter_match.group(1))}"
     elif book_match:
         qualifier = f" (Book {normalize_volume_number(book_match.group(1))})"
     elif named_half_match:
@@ -748,9 +768,21 @@ def decode_string_list(value: str | None) -> list[str]:
 
 
 def normalize_volume_number(value: str) -> str:
+    if value.casefold() == "zero":
+        return "0"
     whole, separator, fraction = value.partition(".")
     normalized_whole = str(int(whole))
     return f"{normalized_whole}.{fraction}" if separator else normalized_whole
+
+
+def normalize_volume_designator(value: str) -> str:
+    parts = re.split(r"\s*[-–—]\s*", value, maxsplit=1)
+    if len(parts) == 2:
+        return (
+            f"{normalize_volume_number(parts[0])}"
+            f"–{normalize_volume_number(parts[1])}"
+        )
+    return normalize_volume_number(value)
 
 
 def roman_to_integer(value: str) -> int | None:
@@ -770,7 +802,7 @@ def roman_to_integer(value: str) -> int | None:
 
 
 def compact_volume_badge(number: str, suffix: str) -> str:
-    normalized_number = normalize_volume_number(number)
+    normalized_number = normalize_volume_designator(number)
     qualifier = re.search(
         r"\b(Part|Act|Canto)\s+([0-9]+|[IVX]+)\b",
         suffix,
@@ -789,10 +821,31 @@ def compact_volume_badge(number: str, suffix: str) -> str:
         part_number = roman_to_integer(roman_half.group(1))
         if part_number:
             return f"Vol. {normalized_number}.{part_number}"
-    named = re.search(r"\b(Exordium|Finale)\b", suffix, re.IGNORECASE)
+    chapter = re.search(r"\bChapter\s+([0-9]+)\b", suffix, re.IGNORECASE)
+    if chapter:
+        return f"Vol. {normalized_number} Ch. {normalize_volume_number(chapter.group(1))}"
+    named = re.search(
+        r"\b(Exordium|Finale|Prologue|Afterword)\b",
+        suffix,
+        re.IGNORECASE,
+    )
     if named:
         return f"Vol. {normalized_number} {named.group(1).title()}"
     return f"Vol. {normalized_number}"
+
+
+def compact_catalog_volume_badge(label: str | None) -> str | None:
+    if not label:
+        return None
+    match = re.search(
+        r"\b(?:Volume|Vol\.?)\s*"
+        r"(Zero|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—]\s*[0-9]+(?:\.[0-9]+)?)?)\b",
+        label,
+        re.IGNORECASE,
+    )
+    if not match:
+        return extract_named_release_label(label)
+    return compact_volume_badge(match.group(1), label[match.end() :])
 
 
 def normalize_legacy_title_case(value: str) -> str:
@@ -887,19 +940,49 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
         cleaned,
         flags=re.IGNORECASE,
     )
-    match = re.search(
-        r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
-        r"((?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
-        r"(?:\s*[:\-–—]\s+.+?)?)"
-        r"(?:\s+Light\s+Novel)?(?:\s+(PDF))?$",
-        cleaned,
-        flags=re.IGNORECASE,
+    matches = list(
+        re.finditer(
+            r"\s+(?:Volume|Vol\.?)\s*"
+            r"(Zero|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—]\s*[0-9]+(?:\.[0-9]+)?)?)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
     )
+    match = matches[-1] if matches else None
     if match:
-        series_title = cleaned[: match.start()].rstrip(" .…")
-        if match.group(3):
+        suffix = cleaned[match.end() :]
+        has_pdf_suffix = bool(re.search(r"\bPDF\s*$", suffix, re.IGNORECASE))
+        series_title = cleaned[: match.start()].rstrip(" ,:;.-–—…")
+        if has_pdf_suffix:
             series_title = f"{series_title} PDF"
-        return series_title, compact_volume_badge(match.group(1), match.group(2))
+        return series_title, compact_volume_badge(match.group(1), suffix)
+
+    bare_number = re.search(
+        r"\s+([0-9]+(?:\.[0-9]+)?)(?:\s+(PDF))?$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    bare_slug = re.search(
+        r"-([0-9]+(?:\.[0-9]+)?)-(?:epub|pdf)/?$",
+        urllib.parse.urlparse(url).path,
+        re.IGNORECASE,
+    )
+    if (
+        bare_number
+        and bare_slug
+        and normalize_volume_number(bare_number.group(1))
+        == normalize_volume_number(bare_slug.group(1))
+    ):
+        series_title = cleaned[: bare_number.start()].rstrip(" ,:;.-–—…")
+        series_title = re.sub(
+            r"\s+Light\s+Novel$",
+            "",
+            series_title,
+            flags=re.IGNORECASE,
+        )
+        if bare_number.group(2):
+            series_title = f"{series_title} PDF"
+        return series_title, f"Vol. {normalize_volume_number(bare_number.group(1))}"
 
     slug_match = re.search(
         r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-(?:epub|pdf)/?$",
@@ -980,6 +1063,39 @@ def book_page_format(title: str, url: str) -> str | None:
 def book_duplicate_key(title: str, url: str) -> tuple[str, str]:
     _, volume_label = parse_book_identity(title, url)
     return series_identity_key(title, url), (volume_label or "").casefold()
+
+
+def series_keys_are_related(first: str, second: str) -> bool:
+    if not first or not second:
+        return False
+    if first == second:
+        return True
+    shorter, longer = sorted((first, second), key=len)
+    return len(shorter.split()) >= 2 and longer.startswith(f"{shorter} ")
+
+
+def parent_hint_aliases(hints: list[str], url: str) -> list[tuple[str, str]]:
+    aliases: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for hint in hints:
+        for segment in re.split(r"[()]", hint):
+            cleaned = re.sub(
+                r"^.*?\b(?:download|read)\s+",
+                "",
+                segment.strip(),
+                flags=re.IGNORECASE,
+            )
+            title, volume_label = parse_book_identity(cleaned, url)
+            key = series_identity_key(cleaned, url)
+            if (
+                not volume_label
+                or len(key.split()) < 2
+                or key in seen
+            ):
+                continue
+            seen.add(key)
+            aliases.append((title, key))
+    return aliases
 
 
 def delete_book_urls(
@@ -1276,6 +1392,7 @@ def initialize_db() -> None:
     prepare_legacy_reparse()
     prune_pdf_duplicates()
     cleanup_misclassified_series_tracking()
+    reconcile_legacy_volume_entries()
 
 
 def upsert_books(books: list[Book], source_page: int | None = None) -> int:
@@ -1421,6 +1538,7 @@ def get_public_metadata(
     metadata = get_metadata(connection=connection)
     metadata.pop(SYNC_CHECKPOINT_KEY, None)
     metadata.pop(LEGACY_REPARSE_KEY, None)
+    metadata.pop(LEGACY_VOLUME_RECONCILE_KEY, None)
     return metadata
 
 
@@ -1540,31 +1658,64 @@ def infer_series_parent(
     volume_label_hint: str | None = None,
 ) -> str | None:
     with connect_db() as connection:
-        if download_url:
-            exact_parent = connection.execute(
-                """
-                SELECT sv.series_url
-                FROM series_volumes AS sv
-                WHERE sv.download_url = ?
-                  AND sv.series_url <> ?
-                ORDER BY (
-                    SELECT COUNT(*)
-                    FROM series_volumes AS sibling
-                    WHERE sibling.series_url = sv.series_url
-                ) DESC,
-                sv.series_url
-                LIMIT 1
-                """,
-                (download_url, url),
-            ).fetchone()
-            if exact_parent:
-                return exact_parent["series_url"]
         book = connection.execute(
             "SELECT title FROM books WHERE url = ?",
             (url,),
         ).fetchone()
         if not book:
             return None
+        child_format = book_page_format(book["title"], url)
+        child_key = series_identity_key(book["title"], url)
+        if download_url:
+            exact_parents = connection.execute(
+                """
+                SELECT sv.series_url,
+                       parent.title,
+                       (
+                           SELECT COUNT(*)
+                           FROM series_volumes AS sibling
+                           WHERE sibling.series_url = sv.series_url
+                       ) AS volume_count
+                FROM series_volumes AS sv
+                LEFT JOIN books AS parent ON parent.url = sv.series_url
+                WHERE sv.download_url = ?
+                  AND sv.series_url <> ?
+                """,
+                (download_url, url),
+            ).fetchall()
+            related_exact_parents = [
+                candidate
+                for candidate in exact_parents
+                if series_keys_are_related(
+                    child_key,
+                    series_identity_key(
+                        candidate["title"],
+                        candidate["series_url"],
+                    ),
+                )
+            ]
+            if related_exact_parents:
+                return max(
+                    related_exact_parents,
+                    key=lambda candidate: (
+                        int(
+                            book_page_format(
+                                candidate["title"] or "",
+                                candidate["series_url"],
+                            )
+                            in {child_format, "mixed"}
+                        ),
+                        int(
+                            parse_book_identity(
+                                candidate["title"] or "",
+                                candidate["series_url"],
+                            )[1]
+                            is None
+                        ),
+                        candidate["volume_count"],
+                        candidate["series_url"],
+                    ),
+                )["series_url"]
         _, volume_label = parse_book_identity(book["title"], url)
         volume_label = volume_label or volume_label_hint
         if not volume_label:
@@ -1575,10 +1726,14 @@ def infer_series_parent(
             volume_label,
             flags=re.IGNORECASE,
         )
-        child_keys = [series_identity_key(book["title"], url)]
-        child_keys.extend(
+        hint_aliases = parent_hint_aliases(parent_hints or [], url)
+        hint_keys = [key for _, key in hint_aliases]
+        raw_alias_keys = [
             series_identity_key(hint, url)
             for hint in parent_hints or []
+        ]
+        child_keys = list(
+            dict.fromkeys([child_key, *raw_alias_keys, *hint_keys])
         )
         candidates = connection.execute(
             """
@@ -1590,6 +1745,9 @@ def infer_series_parent(
                 SELECT original_post_url
                 FROM books
                 WHERE original_post_url IS NOT NULL
+                UNION
+                SELECT series_url
+                FROM series_volumes
             )
             SELECT COALESCE(
                        (
@@ -1630,29 +1788,282 @@ def infer_series_parent(
             (catalog_volume_label, url),
         ).fetchall()
 
-    matches: list[tuple[int, str]] = []
+    matches: list[tuple[int, int, int, int, str]] = []
     for candidate in candidates:
         candidate_key = series_identity_key(candidate["title"], candidate["url"])
         candidate_words = candidate_key.split()
         candidate_compact = candidate_key.replace(" ", "")
+        candidate_format = book_page_format(
+            candidate["title"] or "",
+            candidate["url"],
+        )
+        identity_matches = any(
+            child_key == candidate_key
+            for child_key in child_keys
+        )
         title_prefix_matches = any(
             child_key.startswith(f"{candidate_key} ")
             for child_key in child_keys
         )
-        alias_matches = len(candidate_compact) >= 10 and any(
-            candidate_compact in child_key.replace(" ", "")
-            for child_key in child_keys[1:]
+        alias_matches = (
+            candidate_key != child_keys[0]
+            and len(candidate_compact) >= 10
+            and any(
+                candidate_compact in child_key.replace(" ", "")
+                for child_key in child_keys[1:]
+            )
         )
-        if (title_prefix_matches or alias_matches) and (
-            len(candidate_words) >= 5
+        explicit_alias_matches = len(set(hint_keys)) >= 2 and any(
+            series_keys_are_related(candidate_key, alias_key)
             or (
-                len(candidate_words) >= 2
-                and candidate["volume_count"] >= 3
-                and candidate["has_matching_volume"]
+                len(candidate_compact) >= 10
+                and candidate_compact in alias_key.replace(" ", "")
+            )
+            for alias_key in hint_keys
+        )
+        if (
+            identity_matches
+            and candidate["volume_count"] >= 2
+            and candidate["has_matching_volume"]
+        ) or (
+            explicit_alias_matches
+            and candidate["volume_count"] >= 1
+        ) or (
+            (title_prefix_matches or alias_matches)
+            and (
+                len(candidate_words) >= 5
+                or (
+                    len(candidate_words) >= 2
+                    and candidate["volume_count"] >= 3
+                    and candidate["has_matching_volume"]
+                )
             )
         ):
-            matches.append((len(candidate_words), candidate["url"]))
-    return max(matches, default=(0, ""))[1] or None
+            matches.append(
+                (
+                    int(candidate_format in {child_format, "mixed"}),
+                    int(
+                        parse_book_identity(
+                            candidate["title"] or "",
+                            candidate["url"],
+                        )[1]
+                        is None
+                    ),
+                    len(candidate_words),
+                    candidate["volume_count"],
+                    candidate["url"],
+                )
+            )
+    return max(matches, default=(0, 0, 0, 0, ""))[4] or None
+
+
+def merge_explicit_alias_catalogs(
+    canonical_series_url: str,
+    hints: list[str],
+    source_url: str,
+) -> int:
+    aliases = parent_hint_aliases(hints, source_url)
+    alias_keys = {key for _, key in aliases}
+    if len(alias_keys) < 2:
+        return 0
+    source_format = book_page_format("", source_url)
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT b.title, b.url
+            FROM books AS b
+            WHERE b.entry_type = 'series'
+              AND b.url <> ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM series_volumes AS sv
+                  WHERE sv.series_url = b.url
+              )
+            """,
+            (canonical_series_url,),
+        ).fetchall()
+
+    merged = 0
+    for row in rows:
+        candidate_key = series_identity_key(row["title"], row["url"])
+        candidate_format = book_page_format(row["title"], row["url"])
+        if candidate_key not in alias_keys or candidate_format not in {
+            source_format,
+            "mixed",
+        }:
+            continue
+        _, volume_label = parse_book_identity(row["title"], row["url"])
+        if volume_label:
+            with connect_db() as connection:
+                connection.execute(
+                    """
+                    UPDATE books
+                    SET entry_type = 'volume',
+                        original_post_url = ?
+                    WHERE url = ?
+                    """,
+                    (canonical_series_url, row["url"]),
+                )
+        merged += reparent_series_alias(
+            row["url"],
+            canonical_series_url,
+            dedupe_labels=True,
+        )
+    return merged
+
+
+def reconcile_legacy_volume_entries(*, force: bool = False) -> int:
+    with connect_db() as connection:
+        if not force and connection.execute(
+            "SELECT 1 FROM metadata WHERE key = ?",
+            (LEGACY_VOLUME_RECONCILE_KEY,),
+        ).fetchone():
+            return 0
+        rows = connection.execute(
+            """
+            SELECT title, url, download_url
+            FROM books
+            WHERE entry_type = 'series'
+            ORDER BY id
+            """
+        ).fetchall()
+
+    repaired = 0
+    for row in rows:
+        _, volume_label = parse_book_identity(row["title"], row["url"])
+        if not volume_label:
+            continue
+        parent_url = infer_series_parent(
+            row["url"],
+            download_url=row["download_url"],
+            volume_label_hint=re.sub(
+                r"^Vol\.\s+",
+                "Volume ",
+                volume_label,
+                flags=re.IGNORECASE,
+            ),
+        )
+        if not parent_url or not is_cached_series_url(parent_url):
+            continue
+        with connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume',
+                    original_post_url = ?
+                WHERE url = ?
+                """,
+                (parent_url, row["url"]),
+            )
+        reparent_series_alias(row["url"], parent_url)
+        repaired += 1
+
+    repaired += group_orphan_volume_families()
+
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO metadata (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (
+                LEGACY_VOLUME_RECONCILE_KEY,
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            ),
+        )
+    return repaired
+
+
+def group_orphan_volume_families() -> int:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT b.id, b.title, b.url, b.download_url, b.published_at,
+                   (
+                       SELECT COUNT(*)
+                       FROM series_volumes AS sv
+                       WHERE sv.series_url = b.url
+                   ) AS catalog_count
+            FROM books AS b
+            WHERE b.entry_type = 'series'
+              AND b.download_url IS NOT NULL
+            ORDER BY b.published_at IS NULL, b.published_at, b.id
+            """
+        ).fetchall()
+
+    families: dict[tuple[str, str, bool], list[sqlite3.Row]] = {}
+    for row in rows:
+        _, volume_label = parse_book_identity(row["title"], row["url"])
+        page_format = book_page_format(row["title"], row["url"])
+        identity = series_identity_key(row["title"], row["url"])
+        if not volume_label or page_format not in {"epub", "mixed"} or not identity:
+            continue
+        is_webnovel = "webnovel" in f"{row['title']} {row['url']}".casefold()
+        families.setdefault((identity, page_format, is_webnovel), []).append(row)
+
+    grouped = 0
+    for family in families.values():
+        if len(family) < 2:
+            continue
+        canonical = min(
+            family,
+            key=lambda row: (
+                -(row["catalog_count"] > 1),
+                row["published_at"] is None,
+                row["published_at"] or "",
+                row["id"],
+            ),
+        )
+        _, canonical_badge = parse_book_identity(
+            canonical["title"],
+            canonical["url"],
+        )
+        canonical_label = re.sub(
+            r"^Vol\.\s+",
+            "Volume ",
+            canonical_badge or "Volume 1",
+            flags=re.IGNORECASE,
+        )
+        with connect_db() as connection:
+            next_position = connection.execute(
+                """
+                SELECT COALESCE(MAX(position), -1) + 1
+                FROM series_volumes
+                WHERE series_url = ?
+                """,
+                (canonical["url"],),
+            ).fetchone()[0]
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO series_volumes
+                    (series_url, label, download_url, position, cached_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    canonical["url"],
+                    canonical_label,
+                    canonical["download_url"],
+                    next_position,
+                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                ),
+            )
+        for row in family:
+            if row["url"] == canonical["url"]:
+                continue
+            with connect_db() as connection:
+                connection.execute(
+                    """
+                    UPDATE books
+                    SET entry_type = 'volume',
+                        original_post_url = ?
+                    WHERE url = ?
+                    """,
+                    (canonical["url"], row["url"]),
+                )
+            reparent_series_alias(row["url"], canonical["url"])
+            grouped += 1
+        build_fallback_catalog(canonical["url"])
+    return grouped
 
 
 def update_book_details(url: str, details: PostDetails) -> None:
@@ -1741,6 +2152,12 @@ def update_book_details(url: str, details: PostDetails) -> None:
         reconcile_series_downloads(url)
     elif details.original_post_url:
         build_fallback_catalog(details.original_post_url)
+    if inferred_parent and details.parent_hints:
+        merge_explicit_alias_catalogs(
+            inferred_parent,
+            details.parent_hints,
+            url,
+        )
 
 
 def validate_post_details(details: PostDetails) -> None:
@@ -1938,7 +2355,11 @@ def mark_series_unavailable(series_url: str) -> None:
         )
 
 
-def build_fallback_catalog(series_url: str) -> int:
+def build_fallback_catalog(
+    series_url: str,
+    *,
+    dedupe_labels: bool = False,
+) -> int:
     with connect_db() as connection:
         existing_rows = connection.execute(
             """
@@ -1967,7 +2388,7 @@ def build_fallback_catalog(series_url: str) -> int:
         )
         for row in rows
     ]
-    duplicate_label_categories = any(
+    duplicate_label_categories = not dedupe_labels and any(
         label
         and any(
             existing["label"].casefold() == label.casefold()
@@ -2075,7 +2496,12 @@ def build_missing_fallback_catalogs() -> int:
     return sum(build_fallback_catalog(row["original_post_url"]) for row in rows)
 
 
-def reparent_series_alias(old_series_url: str, new_series_url: str) -> int:
+def reparent_series_alias(
+    old_series_url: str,
+    new_series_url: str,
+    *,
+    dedupe_labels: bool = False,
+) -> int:
     with connect_db() as connection:
         before = connection.total_changes
         connection.execute(
@@ -2095,7 +2521,7 @@ def reparent_series_alias(old_series_url: str, new_series_url: str) -> int:
             (old_series_url,),
         )
         changes = connection.total_changes - before
-    build_fallback_catalog(new_series_url)
+    build_fallback_catalog(new_series_url, dedupe_labels=dedupe_labels)
     invalidate_catalog_indexes()
     return changes
 
@@ -3235,16 +3661,35 @@ def list_books(
                          COALESCE(books.original_post_url, books.url)
                      AND preference.hidden = 1
                ) AS is_hidden,
-               (
-                   SELECT sibling.title
+                (
+                    SELECT sibling.title
                    FROM books AS sibling
                    WHERE sibling.original_post_url =
                          COALESCE(books.original_post_url, books.url)
                    ORDER BY sibling.published_at IS NULL,
                             sibling.published_at DESC,
                             sibling.id DESC
-                   LIMIT 1
-               ) AS latest_series_title
+                    LIMIT 1
+                ) AS latest_series_title,
+                COALESCE(
+                    (
+                        SELECT own_catalog_volume.label
+                        FROM series_volumes AS own_catalog_volume
+                        WHERE own_catalog_volume.download_url = books.download_url
+                          AND own_catalog_volume.series_url =
+                              COALESCE(books.original_post_url, books.url)
+                        ORDER BY own_catalog_volume.position
+                        LIMIT 1
+                    ),
+                    (
+                        SELECT matching_catalog_volume.label
+                        FROM series_volumes AS matching_catalog_volume
+                        WHERE matching_catalog_volume.download_url =
+                              books.download_url
+                        ORDER BY matching_catalog_volume.position
+                        LIMIT 1
+                    )
+                ) AS catalog_volume_label
         FROM books
     """ + where_clause
     params: tuple[Any, ...] = filter_params
@@ -3275,6 +3720,9 @@ def list_books(
                 book["latest_series_title"],
                 book["original_post_url"] or book["url"],
             )
+        volume_label = volume_label or compact_catalog_volume_badge(
+            book["catalog_volume_label"]
+        )
         series_url = (
             book["original_post_url"]
             if book["entry_type"] == "volume"

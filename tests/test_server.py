@@ -281,16 +281,22 @@ class ParserTests(unittest.TestCase):
     def test_compacts_split_volume_qualifiers_in_badges(self):
         cases = [
             ("Rebuild World Volume 6 Part 1 Epub", "Vol. 6.1"),
+            ("To Sir, Without Love I’m Divorcing You, Vol. 1, Part 2 Epub", "Vol. 1.2"),
             ("The Misfit of Demon King Academy Volume 10 Act 2 Epub", "Vol. 10.2"),
             (
                 "Min-Maxing My TRPG Build in Another World Volume 9 Canto II Epub",
                 "Vol. 9.2",
             ),
+            ("Example Vol. 11 Canto I Epub", "Vol. 11.1"),
             (
                 "Agents of the Four Seasons Volume 6: Dance of Autumn, Part I Epub",
                 "Vol. 6.1",
             ),
             ("Example Volume 4 II Epub", "Vol. 4.2"),
+            ("No Game No Life Volume 11 Chapter 1 Epub", "Vol. 11 Ch. 1"),
+            ("No Game No Life Volume 11 Prologue Epub", "Vol. 11 Prologue"),
+            ("Monster Girl Doctor Volume Zero Epub", "Vol. 0"),
+            ("Jobless Reincarnation Volume 1-7 Revised Edition", "Vol. 1–7"),
             ("Death’s Daughter and the Ebony Blade Volume 7 Finale Epub", "Vol. 7 Finale"),
         ]
 
@@ -301,6 +307,31 @@ class ParserTests(unittest.TestCase):
                     "https://jnovels.com/example-volume-1-epub/",
                 )
                 self.assertEqual(badge, expected_badge)
+
+    def test_strips_comma_separated_abbreviated_volume_from_series_title(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "To Sir, Without Love I’m Divorcing You, Vol. 1, Part 2 Epub",
+                "https://jnovels.com/to-sir-without-love-volume-1-part-2-epub/",
+            ),
+            ("To Sir, Without Love I’m Divorcing You", "Vol. 1.2"),
+        )
+
+    def test_parses_bare_trailing_volume_number_when_url_agrees(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "I’m the Evil Lord of an Intergalactic Empire 8 Epub",
+                "https://jnovels.com/im-the-evil-lord-of-an-intergalactic-empire-8-epub/",
+            ),
+            ("I’m the Evil Lord of an Intergalactic Empire", "Vol. 8"),
+        )
+        self.assertEqual(
+            server.parse_book_identity(
+                "A Story About 8 Epub",
+                "https://jnovels.com/a-story-about-epub/",
+            ),
+            ("A Story About 8", None),
+        )
 
     def test_parses_format_token_before_canto_qualifier(self):
         self.assertEqual(
@@ -850,6 +881,17 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(server.normalize_volume_number("01"), "1")
         self.assertEqual(server.normalize_volume_number("008"), "8")
         self.assertEqual(server.normalize_volume_number("08.5"), "8.5")
+
+    def test_uses_named_catalog_releases_as_compact_badges(self):
+        self.assertEqual(
+            server.compact_catalog_volume_badge("Side Stories"),
+            "Side Stories",
+        )
+        self.assertEqual(
+            server.compact_catalog_volume_badge("Disc EX"),
+            "Disc Ex",
+        )
+        self.assertIsNone(server.compact_catalog_volume_badge("Complete edition"))
 
 
 class DatabaseTests(unittest.TestCase):
@@ -1649,6 +1691,36 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["published_at"], "2026-06-09")
         self.assertEqual(saved["post_url"], volume.url)
 
+    def test_card_badge_falls_back_to_exact_catalog_download_label(self):
+        series_url = "https://example/series"
+        child_url = "https://example/named-release"
+        download_url = "https://files.example/v13"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book(
+                    "Example Series: The Named Release Epub",
+                    child_url,
+                    None,
+                    "2026-01-13",
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 13", download_url, 0)],
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails("volume", series_url, download_url),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[child_url]
+
+        self.assertEqual(saved["volume_label"], "Vol. 13")
+
     def test_series_catalog_uses_series_post_date_for_its_first_download(self):
         series_url = "https://example/series"
         download_url = "https://files.example/v1"
@@ -1770,6 +1842,38 @@ class DatabaseTests(unittest.TestCase):
             "Death March kara Hajimaru Isekai Kyousoukyoku",
         )
 
+    def test_does_not_infer_unrelated_parent_from_reused_download_url(self):
+        unrelated_series_url = "https://jnovels.com/jobless-reincarnation/"
+        child_url = "https://jnovels.com/sword-art-online-volume-3-epub/"
+        reused_download = "https://legacy.example/reused"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Jobless Reincarnation",
+                    unrelated_series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Sword Art Online Alternative Volume 3 EPUB",
+                    child_url,
+                    None,
+                    None,
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            unrelated_series_url,
+            [server.SeriesVolume("Volume 3", reused_download, 0)],
+        )
+
+        self.assertIsNone(
+            server.infer_series_parent(
+                child_url,
+                download_url=reused_download,
+            )
+        )
+
     def test_infers_short_legacy_parent_when_redirect_and_catalog_urls_differ(self):
         series_url = "https://jnovels.com/download-death-march-all-volumes-epub/"
         child_url = "https://jnovels.com/death-march-volume-5-epub/"
@@ -1827,6 +1931,365 @@ class DatabaseTests(unittest.TestCase):
         }[child_url]
         self.assertEqual(saved["entry_type"], "volume")
         self.assertEqual(saved["original_post_url"], series_url)
+
+    def test_infers_exact_identity_parent_when_catalog_contains_volume(self):
+        series_url = "https://jnovels.com/example-all-volumes-epub/"
+        child_url = "https://jnovels.com/example-volume-8-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Example All Volumes EPUB",
+                    series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Example Volume 8 EPUB",
+                    child_url,
+                    None,
+                    "2018-10-30",
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume(
+                    f"Volume {number}",
+                    f"https://catalog.example/v{number}",
+                    number - 1,
+                )
+                for number in range(1, 9)
+            ],
+        )
+
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://legacy-redirect.example/v8",
+                [
+                    server.SeriesVolume(
+                        "Volume 8",
+                        "https://legacy-redirect.example/v8",
+                        0,
+                    )
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[child_url]
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], series_url)
+
+    def test_identity_parent_inference_prefers_matching_page_format(self):
+        epub_url = "https://jnovels.com/example-all-volumes-epub/"
+        pdf_url = "https://jnovels.com/example-all-volumes-pdf/"
+        child_url = "https://jnovels.com/example-volume-2-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", epub_url, None, None),
+                server.Book("Example All Volumes PDF", pdf_url, None, None),
+                server.Book("Example Volume 2 EPUB", child_url, None, None),
+            ]
+        )
+        for series_url, extension in ((epub_url, "epub"), (pdf_url, "pdf")):
+            server.replace_series_volumes(
+                series_url,
+                [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/{extension}-{number}",
+                        number - 1,
+                    )
+                    for number in range(1, 4)
+                ],
+            )
+
+        self.assertEqual(server.infer_series_parent(child_url), epub_url)
+
+    def test_does_not_infer_exact_identity_parent_without_matching_volume(self):
+        series_url = "https://jnovels.com/example-all-volumes-epub/"
+        child_url = "https://jnovels.com/example-volume-8-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", series_url, None, None),
+                server.Book("Example Volume 8 EPUB", child_url, None, None),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", "https://catalog.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://catalog.example/v2", 1),
+            ],
+        )
+
+        self.assertIsNone(server.infer_series_parent(child_url))
+
+    def test_same_identity_boilerplate_hint_does_not_chain_single_volume_pages(self):
+        first_url = "https://jnovels.com/example-volume-1-epub/"
+        second_url = "https://jnovels.com/example-volume-2-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Volume 1 EPUB", first_url, None, None),
+                server.Book("Example Volume 2 EPUB", second_url, None, None),
+            ]
+        )
+        server.replace_series_volumes(
+            first_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        self.assertIsNone(
+            server.infer_series_parent(
+                second_url,
+                ["You can now download Example Volume 2 EPUB"],
+                "https://files.example/v2",
+                "Volume 2",
+            )
+        )
+
+    def test_explicit_bilingual_hint_can_match_single_entry_alias_catalog(self):
+        series_url = "https://jnovels.com/japanese-title-all-volumes-epub/"
+        child_url = "https://jnovels.com/japanese-title-volume-2-epub/"
+        fallback_url = "https://jnovels.com/english-series-name-volume-1-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Japanese Title All Volumes EPUB",
+                    series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Japanese Title Volume 2 EPUB",
+                    child_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "English Series Name Volume 1 EPUB",
+                    fallback_url,
+                    None,
+                    None,
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+        server.replace_series_volumes(
+            fallback_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/en-v1", 0),
+                server.SeriesVolume("Volume 3", "https://files.example/en-v3", 1),
+            ],
+        )
+
+        self.assertEqual(
+            server.infer_series_parent(
+                child_url,
+                [
+                    "Download Japanese Title Volume 2 EPUB "
+                    "(English Series Name Volume 2 EPUB)"
+                ],
+                "https://files.example/v2",
+                "Volume 2",
+            ),
+            series_url,
+        )
+
+    def test_explicit_alias_merge_deduplicates_equivalent_volume_labels(self):
+        canonical_url = "https://jnovels.com/japanese-title-all-volumes-epub/"
+        fallback_url = "https://jnovels.com/english-series-name-volume-1-epub/"
+        child_url = "https://jnovels.com/english-series-name-volume-3-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Japanese Title All Volumes EPUB",
+                    canonical_url,
+                    None,
+                    "2018-01-01",
+                ),
+                server.Book(
+                    "English Series Name Volume 1 EPUB",
+                    fallback_url,
+                    None,
+                    "2018-01-01",
+                ),
+                server.Book(
+                    "English Series Name Volume 3 EPUB",
+                    child_url,
+                    None,
+                    "2018-03-01",
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            canonical_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/jp-v1", 0)],
+        )
+        server.replace_series_volumes(
+            fallback_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/en-v1", 0),
+                server.SeriesVolume("Volume 3", "https://files.example/en-v3", 1),
+            ],
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume',
+                    original_post_url = ?,
+                    download_url = ?
+                WHERE url = ?
+                """,
+                (fallback_url, "https://files.example/en-v3", child_url),
+            )
+            connection.execute(
+                "UPDATE books SET entry_type = 'series', download_url = ? WHERE url = ?",
+                ("https://files.example/en-v1", fallback_url),
+            )
+
+        server.merge_explicit_alias_catalogs(
+            canonical_url,
+            [
+                "Download Japanese Title Volume 2 EPUB "
+                "(English Series Name Volume 2 EPUB)"
+            ],
+            "https://jnovels.com/japanese-title-volume-2-epub/",
+        )
+
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(canonical_url)],
+            ["Volume 1", "Volume 3"],
+        )
+
+    def test_reconciles_existing_series_classified_volume_entries(self):
+        series_url = "https://jnovels.com/example-all-volumes-epub/"
+        child_url = "https://jnovels.com/example-volume-2-epub/"
+        download_url = "https://files.example/v2"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", series_url, None, None),
+                server.Book("Example Volume 2 EPUB", child_url, None, None),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", download_url, 1),
+            ],
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "series",
+                None,
+                download_url,
+                [server.SeriesVolume("Volume 2", download_url, 0)],
+            ),
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'series',
+                    original_post_url = NULL
+                WHERE url = ?
+                """,
+                (child_url,),
+            )
+
+        repaired = server.reconcile_legacy_volume_entries(force=True)
+
+        with server.connect_db() as connection:
+            saved = connection.execute(
+                "SELECT entry_type, original_post_url FROM books WHERE url = ?",
+                (child_url,),
+            ).fetchone()
+        self.assertEqual(repaired, 1)
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], series_url)
+
+    def test_groups_same_identity_orphan_volume_pages_into_local_catalog(self):
+        first_url = "https://jnovels.com/example-volume-1-epub/"
+        second_url = "https://jnovels.com/example-volume-2-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Example Volume 1 EPUB",
+                    first_url,
+                    None,
+                    "2018-01-01",
+                ),
+                server.Book(
+                    "Example Volume 2 EPUB",
+                    second_url,
+                    None,
+                    "2018-02-01",
+                ),
+            ]
+        )
+        server.update_book_details(
+            first_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+            ),
+        )
+        server.update_book_details(
+            second_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v2",
+                [server.SeriesVolume("Volume 2", "https://files.example/v2", 0)],
+            ),
+        )
+
+        grouped = server.group_orphan_volume_families()
+
+        with server.connect_db() as connection:
+            second = connection.execute(
+                "SELECT entry_type, original_post_url FROM books WHERE url = ?",
+                (second_url,),
+            ).fetchone()
+        self.assertEqual(grouped, 1)
+        self.assertEqual(second["entry_type"], "volume")
+        self.assertEqual(second["original_post_url"], first_url)
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(first_url)],
+            ["Volume 1", "Volume 2"],
+        )
+
+    def test_orphan_grouping_does_not_mix_formats(self):
+        epub_url = "https://jnovels.com/example-volume-1-epub/"
+        pdf_url = "https://jnovels.com/example-volume-2-pdf/"
+        server.upsert_books(
+            [
+                server.Book("Example Volume 1 EPUB", epub_url, None, None),
+                server.Book("Example Volume 2 PDF", pdf_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            epub_url,
+            server.PostDetails("series", None, "https://files.example/v1"),
+        )
+        server.update_book_details(
+            pdf_url,
+            server.PostDetails("series", None, "https://files.example/v2"),
+        )
+
+        self.assertEqual(server.group_orphan_volume_families(), 0)
 
     def test_infers_orphaned_parent_catalog_from_associated_name_alias(self):
         legacy_url = "https://jnovels.com/download-eiyuu-kyoushitsu-epub/"
