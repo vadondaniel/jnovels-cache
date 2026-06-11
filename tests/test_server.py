@@ -986,6 +986,60 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([book["title"] for book in books], ["100% Example"])
         self.assertEqual(count, 1)
 
+    def test_search_terms_are_order_independent_and_noncontiguous(self):
+        matching = server.Book(
+            "How a Realist Hero Rebuilt the Kingdom Volume 21",
+            "https://example/matching",
+            None,
+            None,
+        )
+        partial = server.Book(
+            "How a Realist Villain Rebuilt the Empire",
+            "https://example/partial",
+            None,
+            None,
+        )
+        server.upsert_books([matching, partial])
+
+        books = server.list_books("kingdom realist 21", "title_asc")
+
+        self.assertEqual([book["url"] for book in books], [matching.url])
+        self.assertEqual(server.count_books("kingdom, realist! 21"), 1)
+
+    def test_numeric_search_term_does_not_match_every_series_sibling(self):
+        series = server.Book(
+            "Example Series All Volumes EPUB",
+            "https://example/series",
+            None,
+            None,
+        )
+        volume_20 = server.Book(
+            "Example Series Volume 20 EPUB",
+            "https://example/volume-20",
+            None,
+            None,
+        )
+        volume_21 = server.Book(
+            "Example Series Volume 21 EPUB",
+            "https://example/volume-21",
+            None,
+            None,
+        )
+        server.upsert_books([series, volume_20, volume_21])
+        for volume in (volume_20, volume_21):
+            server.update_book_details(
+                volume.url,
+                server.PostDetails(
+                    "volume",
+                    series.url,
+                    f"https://files.example/{volume.url.rsplit('-', 1)[-1]}",
+                ),
+            )
+
+        books = server.list_books("series 21", "title_asc")
+
+        self.assertEqual([book["url"] for book in books], [volume_21.url])
+
     def test_search_matches_latest_title_across_series_family(self):
         series = server.Book(
             "DOWNLOAD DEATH MARCH ALL VOLUMES EPUB",

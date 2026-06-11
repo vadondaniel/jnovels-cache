@@ -2515,29 +2515,42 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
     conditions: list[str] = []
     params: list[str] = []
     if query:
-        escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        conditions.append(
-            """
-            (
-                books.title LIKE ? ESCAPE '\\'
-                OR books.associated_names LIKE ? ESCAPE '\\'
-                OR EXISTS (
-                    SELECT 1
-                    FROM books AS parent
-                    WHERE parent.url = books.original_post_url
-                      AND parent.title LIKE ? ESCAPE '\\'
+        terms = re.findall(r"[\w%\\]+", query, flags=re.UNICODE)
+        for term in terms:
+            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            if term.isdecimal():
+                conditions.append(
+                    """
+                    (
+                        books.title LIKE ? ESCAPE '\\'
+                        OR books.associated_names LIKE ? ESCAPE '\\'
+                    )
+                    """
                 )
-                OR EXISTS (
-                    SELECT 1
-                    FROM books AS sibling
-                    WHERE sibling.original_post_url =
-                          COALESCE(books.original_post_url, books.url)
-                      AND sibling.title LIKE ? ESCAPE '\\'
+                params.extend([f"%{escaped}%"] * 2)
+                continue
+            conditions.append(
+                """
+                (
+                    books.title LIKE ? ESCAPE '\\'
+                    OR books.associated_names LIKE ? ESCAPE '\\'
+                    OR EXISTS (
+                        SELECT 1
+                        FROM books AS parent
+                        WHERE parent.url = books.original_post_url
+                          AND parent.title LIKE ? ESCAPE '\\'
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM books AS sibling
+                        WHERE sibling.original_post_url =
+                              COALESCE(books.original_post_url, books.url)
+                          AND sibling.title LIKE ? ESCAPE '\\'
+                    )
                 )
+                """
             )
-            """
-        )
-        params.extend([f"%{escaped}%"] * 4)
+            params.extend([f"%{escaped}%"] * 4)
 
     if entry_filter == "series":
         conditions.append("entry_type = 'series'")
