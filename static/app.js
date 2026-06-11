@@ -16,7 +16,7 @@ const state = {
 
 const defaultSort = "published_desc";
 const validSorts = new Set(["published_desc", "published_asc", "title_asc", "title_desc", "cached_desc"]);
-const validFilters = new Set(["all", "series", "volumes", "pending"]);
+const validFilters = new Set(["all", "series", "volumes", "pending", "favorites", "hidden"]);
 
 const elements = {
   search: document.querySelector("#search"),
@@ -165,6 +165,10 @@ function renderBooks(books, total) {
     const postLink = card.querySelector(".book-card__action--post");
     const catalogButton = card.querySelector(".book-card__action--catalog");
     const detailsButton = card.querySelector(".book-card__details");
+    const favoriteButton = card.querySelector(".book-card__quick-action--favorite");
+    const hideButton = card.querySelector(".book-card__quick-action--hide");
+    const refreshButton = card.querySelector(".book-card__quick-action--refresh");
+    const seriesActionUrl = book.series_url || book.original_post_url || book.url;
 
     titleLink.textContent = book.series_title;
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
@@ -179,6 +183,90 @@ function renderBooks(books, total) {
             ? "Volume"
             : "Details pending");
     type.classList.toggle("is-pending", !book.entry_type);
+
+    favoriteButton.classList.toggle("is-active", book.is_favorite);
+    favoriteButton.setAttribute("aria-pressed", String(book.is_favorite));
+    favoriteButton.setAttribute(
+      "aria-label",
+      book.is_favorite ? "Remove series from favorites" : "Favorite series",
+    );
+    favoriteButton.title = favoriteButton.getAttribute("aria-label");
+    favoriteButton.addEventListener("click", async () => {
+      favoriteButton.disabled = true;
+      try {
+        await request("/api/series-preference", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            series_url: seriesActionUrl,
+            favorite: !book.is_favorite,
+          }),
+        });
+        if (
+          state.filter === "favorites"
+          && book.is_favorite
+          && (state.filterCounts.favorites || 0) <= 1
+        ) {
+          state.filter = "all";
+        }
+        await loadBooks({ historyMode: "replace" });
+        showToast(book.is_favorite ? "Removed from favorites." : "Series favorited.");
+      } catch (error) {
+        favoriteButton.disabled = false;
+        showToast(error.message, true);
+      }
+    });
+
+    hideButton.classList.toggle("is-active", book.is_hidden);
+    hideButton.setAttribute("aria-pressed", String(book.is_hidden));
+    hideButton.setAttribute(
+      "aria-label",
+      book.is_hidden ? "Restore hidden series" : "Hide series",
+    );
+    hideButton.title = hideButton.getAttribute("aria-label");
+    hideButton.addEventListener("click", async () => {
+      hideButton.disabled = true;
+      try {
+        await request("/api/series-preference", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            series_url: seriesActionUrl,
+            hidden: !book.is_hidden,
+          }),
+        });
+        if (
+          state.filter === "hidden"
+          && book.is_hidden
+          && (state.filterCounts.hidden || 0) <= 1
+        ) {
+          state.filter = "all";
+        }
+        await loadBooks({ historyMode: "replace" });
+        showToast(book.is_hidden ? "Series restored." : "Series hidden. Use Hidden to restore it.");
+      } catch (error) {
+        hideButton.disabled = false;
+        showToast(error.message, true);
+      }
+    });
+
+    refreshButton.addEventListener("click", async () => {
+      refreshButton.disabled = true;
+      refreshButton.classList.add("is-running");
+      try {
+        await request("/api/refresh-series", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ series_url: seriesActionUrl, delay: 1 }),
+        });
+        showToast("Series refresh started.");
+        await loadStatus();
+      } catch (error) {
+        refreshButton.disabled = false;
+        refreshButton.classList.remove("is-running");
+        showToast(error.message, true);
+      }
+    });
 
     postLink.href = book.url;
     if (book.download_url) {
@@ -709,6 +797,10 @@ async function loadStatus() {
       clearTimeout(state.pollTimer);
       state.pollTimer = setTimeout(loadStatus, 850);
     } else if (wasRunning) {
+      document.querySelectorAll(".book-card__quick-action--refresh").forEach((button) => {
+        button.disabled = false;
+        button.classList.remove("is-running");
+      });
       if (payload.sync.cache_changed) await loadBooks();
       const message = payload.sync.error
         ? "Sync failed."

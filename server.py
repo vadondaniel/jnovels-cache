@@ -1206,6 +1206,13 @@ def initialize_db() -> None:
                 metadata_checked_at TEXT,
                 unavailable_at TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS series_preferences (
+                series_url TEXT PRIMARY KEY,
+                favorite INTEGER NOT NULL DEFAULT 0,
+                hidden INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
             """
         )
         existing_columns = {
@@ -2397,6 +2404,65 @@ def is_cached_book_url(url: str) -> bool:
         ).fetchone() is not None
 
 
+def is_cached_series_url(url: str) -> bool:
+    with connect_db() as connection:
+        return connection.execute(
+            """
+            SELECT 1
+            FROM books
+            WHERE url = ?
+               OR original_post_url = ?
+            UNION
+            SELECT 1
+            FROM series_volumes
+            WHERE series_url = ?
+            LIMIT 1
+            """,
+            (url, url, url),
+        ).fetchone() is not None
+
+
+def set_series_preference(
+    series_url: str,
+    *,
+    favorite: bool | None = None,
+    hidden: bool | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        current = connection.execute(
+            """
+            SELECT favorite, hidden
+            FROM series_preferences
+            WHERE series_url = ?
+            """,
+            (series_url,),
+        ).fetchone()
+        next_favorite = int(
+            favorite if favorite is not None else bool(current["favorite"]) if current else False
+        )
+        next_hidden = int(
+            hidden if hidden is not None else bool(current["hidden"]) if current else False
+        )
+        connection.execute(
+            """
+            INSERT INTO series_preferences
+                (series_url, favorite, hidden, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(series_url) DO UPDATE SET
+                favorite = excluded.favorite,
+                hidden = excluded.hidden,
+                updated_at = excluded.updated_at
+            """,
+            (series_url, next_favorite, next_hidden, now),
+        )
+    return {
+        "series_url": series_url,
+        "favorite": bool(next_favorite),
+        "hidden": bool(next_hidden),
+    }
+
+
 def cache_content_signature() -> str:
     digest = hashlib.sha256()
     with connect_db() as connection:
@@ -2974,7 +3040,42 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
             )
             params.extend([f"%{escaped}%"] * 4)
 
-    if entry_filter == "series":
+    preference_series_url = "COALESCE(books.original_post_url, books.url)"
+    if entry_filter == "hidden":
+        conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1
+                FROM series_preferences AS preference
+                WHERE preference.series_url = {preference_series_url}
+                  AND preference.hidden = 1
+            )
+            """
+        )
+    else:
+        conditions.append(
+            f"""
+            NOT EXISTS (
+                SELECT 1
+                FROM series_preferences AS preference
+                WHERE preference.series_url = {preference_series_url}
+                  AND preference.hidden = 1
+            )
+            """
+        )
+
+    if entry_filter == "favorites":
+        conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1
+                FROM series_preferences AS preference
+                WHERE preference.series_url = {preference_series_url}
+                  AND preference.favorite = 1
+            )
+            """
+        )
+    elif entry_filter == "series":
         conditions.append("entry_type = 'series'")
     elif entry_filter == "volumes":
         conditions.append("entry_type = 'volume'")
@@ -3007,14 +3108,66 @@ def count_book_filters() -> dict[str, int]:
     with connect_db() as connection:
         row = connection.execute(
             """
-            SELECT COUNT(*) AS all_count,
-                   SUM(entry_type = 'series') AS series_count,
-                   SUM(entry_type = 'volume') AS volume_count,
+            SELECT SUM(NOT EXISTS (
+                       SELECT 1
+                       FROM series_preferences AS preference
+                       WHERE preference.series_url =
+                             COALESCE(books.original_post_url, books.url)
+                         AND preference.hidden = 1
+                   )) AS all_count,
                    SUM(
-                       detail_cached_at IS NULL
-                       OR entry_type IS NULL
-                       OR download_url IS NULL
+                       entry_type = 'series'
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM series_preferences AS preference
+                           WHERE preference.series_url =
+                                 COALESCE(books.original_post_url, books.url)
+                             AND preference.hidden = 1
+                       )
+                   ) AS series_count,
+                   SUM(
+                       entry_type = 'volume'
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM series_preferences AS preference
+                           WHERE preference.series_url =
+                                 COALESCE(books.original_post_url, books.url)
+                             AND preference.hidden = 1
+                       )
+                   ) AS volume_count,
+                   SUM(
+                       (
+                           detail_cached_at IS NULL
+                           OR entry_type IS NULL
+                           OR download_url IS NULL
+                       )
+                       AND NOT EXISTS (
+                           SELECT 1
+                           FROM series_preferences AS preference
+                           WHERE preference.series_url =
+                                 COALESCE(books.original_post_url, books.url)
+                             AND preference.hidden = 1
+                       )
                    ) AS pending_count
+                   ,SUM(
+                       EXISTS (
+                           SELECT 1
+                           FROM series_preferences AS preference
+                           WHERE preference.series_url =
+                                 COALESCE(books.original_post_url, books.url)
+                             AND preference.favorite = 1
+                             AND preference.hidden = 0
+                       )
+                   ) AS favorite_count
+                   ,SUM(
+                       EXISTS (
+                           SELECT 1
+                           FROM series_preferences AS preference
+                           WHERE preference.series_url =
+                                 COALESCE(books.original_post_url, books.url)
+                             AND preference.hidden = 1
+                       )
+                   ) AS hidden_count
             FROM books
             """
         ).fetchone()
@@ -3023,6 +3176,8 @@ def count_book_filters() -> dict[str, int]:
         "series": row["series_count"] or 0,
         "volumes": row["volume_count"] or 0,
         "pending": row["pending_count"] or 0,
+        "favorites": row["favorite_count"] or 0,
+        "hidden": row["hidden_count"] or 0,
     }
 
 
@@ -3057,6 +3212,20 @@ def list_books(
                source_order,
                entry_type, original_post_url, download_url, detail_cached_at,
                associated_names, genres, synopsis,
+               EXISTS (
+                   SELECT 1
+                   FROM series_preferences AS preference
+                   WHERE preference.series_url =
+                         COALESCE(books.original_post_url, books.url)
+                     AND preference.favorite = 1
+               ) AS is_favorite,
+               EXISTS (
+                   SELECT 1
+                   FROM series_preferences AS preference
+                   WHERE preference.series_url =
+                         COALESCE(books.original_post_url, books.url)
+                     AND preference.hidden = 1
+               ) AS is_hidden,
                (
                    SELECT sibling.title
                    FROM books AS sibling
@@ -3089,6 +3258,8 @@ def list_books(
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
         book["genres"] = decode_string_list(book["genres"])
+        book["is_favorite"] = bool(book["is_favorite"])
+        book["is_hidden"] = bool(book["is_hidden"])
         series_title, volume_label = parse_book_identity(book["title"], book["url"])
         if book["latest_series_title"]:
             series_title, _ = parse_book_identity(
@@ -3220,7 +3391,14 @@ class AppHandler(SimpleHTTPRequestHandler):
             query = params.get("q", [""])[0].strip()
             sort = params.get("sort", ["published_desc"])[0]
             entry_filter = params.get("filter", ["all"])[0].strip().casefold()
-            if entry_filter not in {"all", "series", "volumes", "pending"}:
+            if entry_filter not in {
+                "all",
+                "series",
+                "volumes",
+                "pending",
+                "favorites",
+                "hidden",
+            }:
                 entry_filter = "all"
             filter_counts = count_book_filters()
             if entry_filter != "all" and not filter_counts[entry_filter]:
@@ -3294,11 +3472,66 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {"/api/sync", "/api/repair-entry"}:
+        if parsed.path not in {
+            "/api/sync",
+            "/api/repair-entry",
+            "/api/series-preference",
+            "/api/refresh-series",
+        }:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         try:
             payload = self.read_json()
+            if parsed.path == "/api/series-preference":
+                series_url = str(payload.get("series_url", "")).strip()
+                if not series_url or not is_cached_series_url(series_url):
+                    self.send_json(
+                        {"error": "Cached series not found."},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                favorite_value = payload.get("favorite")
+                hidden_value = payload.get("hidden")
+                if favorite_value is not None and not isinstance(favorite_value, bool):
+                    raise ValueError("Invalid favorite preference")
+                if hidden_value is not None and not isinstance(hidden_value, bool):
+                    raise ValueError("Invalid hidden preference")
+                if favorite_value is None and hidden_value is None:
+                    raise ValueError("Missing preference")
+                preference = set_series_preference(
+                    series_url,
+                    favorite=favorite_value,
+                    hidden=hidden_value,
+                )
+                self.send_json(preference)
+                return
+
+            if parsed.path == "/api/refresh-series":
+                series_url = str(payload.get("series_url", "")).strip()
+                delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
+                if not series_url or not is_cached_series_url(series_url):
+                    self.send_json(
+                        {"error": "Cached series not found."},
+                        HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                started = start_sync_thread(
+                    1,
+                    1,
+                    delay,
+                    "series_refresh",
+                    series_urls_override=[series_url],
+                    name="jnovels-refresh-series",
+                )
+                if not started:
+                    self.send_json(
+                        {"error": "A sync is already running."},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
+                self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+                return
+
             if parsed.path == "/api/repair-entry":
                 url = str(payload.get("url", "")).strip()
                 delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)

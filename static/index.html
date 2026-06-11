@@ -66,6 +66,8 @@
           <button type="button" data-filter="series" aria-pressed="false">Series</button>
           <button type="button" data-filter="volumes" aria-pressed="false">Volumes</button>
           <button type="button" data-filter="pending" aria-pressed="false">Pending</button>
+          <button type="button" data-filter="favorites" aria-pressed="false">Favorites</button>
+          <button type="button" data-filter="hidden" aria-pressed="false">Hidden</button>
         </nav>
       </div>
     </section>
@@ -156,6 +158,17 @@
 
   <template id="book-template">
     <article class="book-card">
+      <div class="book-card__quick-actions">
+        <button class="book-card__quick-action book-card__quick-action--favorite" type="button" aria-label="Favorite series" title="Favorite series">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>
+        </button>
+        <button class="book-card__quick-action book-card__quick-action--hide" type="button" aria-label="Hide series" title="Hide series">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3l18 18M10.6 10.7a2 2 0 0 0 2.7 2.7M9.9 4.3A10.8 10.8 0 0 1 12 4c5.5 0 9 5 9 5a15 15 0 0 1-2.1 2.7M6.2 6.2C4.1 7.5 3 9 3 9s3.5 5 9 5c1 0 2-.2 2.8-.5"/></svg>
+        </button>
+        <button class="book-card__quick-action book-card__quick-action--refresh" type="button" aria-label="Refresh series" title="Refresh series">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6v5h-5M4 18v-5h5M18.5 9A7 7 0 0 0 6.2 6.2L4 8m16 8-2.2 1.8A7 7 0 0 1 5.5 15"/></svg>
+        </button>
+      </div>
       <a class="book-card__cover-link" target="_blank" rel="noopener">
         <div class="book-card__cover">
           <img alt="" loading="lazy" referrerpolicy="no-referrer">

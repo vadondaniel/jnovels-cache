@@ -1294,6 +1294,62 @@ class DatabaseTests(unittest.TestCase):
                 "series": 1,
                 "volumes": 1,
                 "pending": 1,
+                "favorites": 0,
+                "hidden": 0,
+            },
+        )
+
+    def test_series_preferences_apply_to_every_entry_and_remain_recoverable(self):
+        series_url = "https://example/series"
+        series = server.Book("Example Series", series_url, None, None)
+        volume = server.Book(
+            "Example Series Volume 2",
+            "https://example/series-volume-2",
+            None,
+            "2026-01-02",
+        )
+        server.upsert_books([series, volume])
+        server.update_book_details(
+            series.url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/2", 1),
+                ],
+            ),
+        )
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series_url, "https://files.example/2"),
+        )
+
+        server.set_series_preference(series_url, favorite=True)
+        favorites = server.list_books("", "title_asc", entry_filter="favorites")
+        self.assertEqual({book["url"] for book in favorites}, {series.url, volume.url})
+        self.assertTrue(all(book["is_favorite"] for book in favorites))
+
+        server.set_series_preference(series_url, hidden=True)
+        self.assertEqual(server.list_books("", "title_asc"), [])
+        hidden = server.list_books("", "title_asc", entry_filter="hidden")
+        self.assertEqual({book["url"] for book in hidden}, {series.url, volume.url})
+        self.assertTrue(all(book["is_hidden"] for book in hidden))
+        self.assertEqual(server.count_book_filters()["hidden"], 2)
+
+        server.set_series_preference(series_url, hidden=False)
+        restored = server.list_books("", "title_asc")
+        self.assertEqual({book["url"] for book in restored}, {series.url, volume.url})
+        self.assertEqual(
+            server.count_book_filters(),
+            {
+                "all": 2,
+                "series": 1,
+                "volumes": 1,
+                "pending": 0,
+                "favorites": 2,
+                "hidden": 0,
             },
         )
 
