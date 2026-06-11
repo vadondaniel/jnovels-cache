@@ -515,7 +515,15 @@ function updateStatus(payload) {
     showToast(sync.notice);
   }
   const lastSync = payload.metadata.last_sync_at;
-  elements.lastSync.textContent = lastSync ? `Last synced ${formatDate(lastSync)}` : "Not synced yet";
+  elements.lastSync.textContent = lastSync
+    ? `Last synced ${formatDate(lastSync, {
+        year: "numeric",
+        month: "short",
+        day: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`
+    : "Not synced yet";
   elements.syncToggle.disabled = sync.running;
   elements.syncToggle.classList.toggle("is-running", sync.running);
   elements.cacheHealth.hidden =
