@@ -56,17 +56,17 @@
         <span id="last-sync">Not synced yet</span>
       </div>
       <div class="status-row__activity">
+        <button id="cache-health" class="cache-health" type="button" hidden></button>
+        <div id="sync-status" class="sync-status" hidden>
+          <span id="sync-status-label"></span>
+          <span id="sync-status-detail" class="sync-status__detail" role="tooltip"></span>
+        </div>
         <nav class="entry-filters" aria-label="Filter cached entries">
           <button type="button" data-filter="all" aria-pressed="true">All</button>
           <button type="button" data-filter="series" aria-pressed="false">Series</button>
           <button type="button" data-filter="volumes" aria-pressed="false">Volumes</button>
           <button type="button" data-filter="pending" aria-pressed="false">Pending</button>
         </nav>
-        <button id="cache-health" class="cache-health" type="button" hidden></button>
-        <div id="sync-status" class="sync-status">
-          <span id="sync-status-label"></span>
-          <span id="sync-status-detail" class="sync-status__detail" role="tooltip"></span>
-        </div>
       </div>
     </section>
 

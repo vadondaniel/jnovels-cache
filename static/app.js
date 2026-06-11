@@ -537,6 +537,7 @@ function updateStatus(payload) {
     : "Open repair options";
 
   if (sync.running) {
+    elements.syncStatus.hidden = false;
     const detailLines = [];
     const queuedDetails = sync.queued_details || 0;
     const queuedSeries = sync.queued_series || 0;
@@ -572,11 +573,10 @@ function updateStatus(payload) {
     elements.syncStatus.classList.add("is-running");
   } else {
     elements.syncStatus.classList.remove("is-running");
+    elements.syncStatus.hidden = !sync.error;
     elements.syncStatusLabel.textContent = sync.error
       ? `Last sync failed: ${sync.error}`
-      : lastSync
-        ? `${payload.count} cached ${payload.count === 1 ? "entry" : "entries"}`
-        : "";
+      : "";
     elements.syncStatusDetail.textContent = "";
     elements.syncStatus.removeAttribute("tabindex");
   }
