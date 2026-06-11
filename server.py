@@ -3273,9 +3273,18 @@ def list_books(
         )
         catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
         download_catalog = download_catalog_index.get(book["download_url"] or "")
-        if download_catalog and download_catalog[1] > volume_counts.get(series_url or "", 0):
+        may_infer_catalog = not series_url or volume_counts.get(series_url, 0) <= 1
+        if (
+            may_infer_catalog
+            and download_catalog
+            and download_catalog[1] > volume_counts.get(series_url or "", 0)
+        ):
             series_url = download_catalog[0]
-        if catalog and catalog[1] > volume_counts.get(series_url or "", 0):
+        if (
+            may_infer_catalog
+            and catalog
+            and catalog[1] > volume_counts.get(series_url or "", 0)
+        ):
             series_url = catalog[0]
         book["series_title"] = series_title
         book["volume_label"] = volume_label

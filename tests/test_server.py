@@ -1353,6 +1353,83 @@ class DatabaseTests(unittest.TestCase):
             },
         )
 
+    def test_explicit_parent_keeps_separate_catalog_and_preferences(self):
+        light_novel_url = "https://jnovels.com/example-light-novel-epub/"
+        webnovel_url = "https://jnovels.com/webnovelpdfepub-example/"
+        volume_url = "https://jnovels.com/example-volume-11-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Light Novel Epub", light_novel_url, None, None),
+                server.Book("[WEBNOVEL][PDF][EPUB] Example", webnovel_url, None, None),
+                server.Book("Example Volume 11 Epub", volume_url, None, "2026-01-11"),
+            ]
+        )
+        server.update_book_details(
+            light_novel_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/light-1",
+                [server.SeriesVolume("Volume 1", "https://files.example/light-1", 0)],
+            ),
+        )
+        server.update_book_details(
+            webnovel_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/web-1",
+                [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/web-{number}",
+                        number - 1,
+                    )
+                    for number in range(1, 12)
+                ],
+            ),
+        )
+        server.update_book_details(
+            volume_url,
+            server.PostDetails(
+                "volume",
+                light_novel_url,
+                "https://files.example/web-11",
+            ),
+        )
+
+        server.set_series_preference(webnovel_url, favorite=True)
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+        self.assertFalse(saved[light_novel_url]["is_favorite"])
+        self.assertTrue(saved[webnovel_url]["is_favorite"])
+        self.assertFalse(saved[volume_url]["is_favorite"])
+        self.assertEqual(saved[volume_url]["series_url"], light_novel_url)
+        self.assertEqual(saved[volume_url]["volume_count"], 2)
+
+        server.set_series_preference(light_novel_url, favorite=True)
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+        self.assertTrue(saved[light_novel_url]["is_favorite"])
+        self.assertTrue(saved[webnovel_url]["is_favorite"])
+        self.assertTrue(saved[volume_url]["is_favorite"])
+        with server.connect_db() as connection:
+            preferred_urls = {
+                row["series_url"]
+                for row in connection.execute(
+                    """
+                    SELECT series_url
+                    FROM series_preferences
+                    WHERE favorite = 1
+                    """
+                )
+            }
+        self.assertEqual(preferred_urls, {light_novel_url, webnovel_url})
+
     def test_series_display_title_uses_its_latest_volume_title(self):
         series = server.Book(
             "Isekai ni Tensei Shitanda kedo Ore All Volumes EPUB",
