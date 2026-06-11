@@ -20,6 +20,7 @@ const validFilters = new Set(["all", "series", "volumes", "pending", "favorites"
 
 const elements = {
   search: document.querySelector("#search"),
+  searchClear: document.querySelector("#search-clear"),
   sourceSearch: document.querySelector("#source-search"),
   sort: document.querySelector("#sort"),
   grid: document.querySelector("#book-grid"),
@@ -100,6 +101,10 @@ function updateSourceSearchLink() {
   elements.sourceSearch.href = url;
 }
 
+function updateSearchClearButton() {
+  elements.searchClear.hidden = !elements.search.value;
+}
+
 function applyViewFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const page = Number.parseInt(params.get("page") || "1", 10);
@@ -107,6 +112,7 @@ function applyViewFromUrl() {
   const entryFilter = params.get("filter") || "all";
 
   elements.search.value = params.get("q") || "";
+  updateSearchClearButton();
   elements.sort.value = validSorts.has(sort) ? sort : defaultSort;
   state.filter = validFilters.has(entryFilter) ? entryFilter : "all";
   state.page = Number.isNaN(page) ? 1 : Math.max(page, 1);
@@ -961,11 +967,23 @@ async function startPageLoadCatchup() {
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.page = 1;
+  updateSearchClearButton();
   updateSourceSearchLink();
   state.searchTimer = setTimeout(
     () => loadBooks({ historyMode: "replace" }).catch((error) => showToast(error.message, true)),
     160,
   );
+});
+
+elements.searchClear.addEventListener("click", () => {
+  if (!elements.search.value) return;
+  clearTimeout(state.searchTimer);
+  elements.search.value = "";
+  state.page = 1;
+  updateSearchClearButton();
+  updateSourceSearchLink();
+  elements.search.focus();
+  loadBooks({ historyMode: "replace" }).catch((error) => showToast(error.message, true));
 });
 
 elements.sort.addEventListener("change", () => {
