@@ -16,6 +16,8 @@
   --gold-text: #765815;
   --gold-contrast: #2d220a;
   --gold-wash: rgba(215, 173, 75, .22);
+  --favorite-line: rgba(139, 104, 29, .48);
+  --favorite-shadow: rgba(139, 104, 29, .13);
   --pending-wash: rgba(25, 23, 19, .07);
   --line: #dcd6c9;
   --line-dark: rgba(255, 255, 255, 0.12);
@@ -375,6 +377,19 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .book-card:hover {
   transform: translateY(-3px);
   box-shadow: 0 14px 30px rgba(38, 31, 18, .11);
+}
+
+.book-card.is-favorite {
+  border-color: var(--favorite-line);
+  box-shadow:
+    0 5px 18px rgba(38, 31, 18, .055),
+    0 0 0 2px var(--favorite-shadow);
+}
+
+.book-card.is-favorite:hover {
+  box-shadow:
+    0 14px 30px rgba(38, 31, 18, .11),
+    0 0 0 2px var(--favorite-shadow);
 }
 
 .book-card__quick-actions {
@@ -1292,6 +1307,8 @@ button, a { -webkit-tap-highlight-color: transparent; }
     --gold-text: #ddba66;
     --gold-contrast: #f3d98f;
     --gold-wash: rgba(215, 173, 75, .14);
+    --favorite-line: rgba(228, 189, 98, .5);
+    --favorite-shadow: rgba(215, 173, 75, .12);
     --pending-wash: rgba(255, 255, 255, .07);
     --line: #3b382f;
     --disabled: #6f6a60;
@@ -1307,6 +1324,18 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
   .book-card:hover {
     box-shadow: 0 14px 30px rgba(0, 0, 0, .34);
+  }
+
+  .book-card.is-favorite {
+    box-shadow:
+      var(--shadow),
+      0 0 0 2px var(--favorite-shadow);
+  }
+
+  .book-card.is-favorite:hover {
+    box-shadow:
+      0 14px 30px rgba(0, 0, 0, .34),
+      0 0 0 2px var(--favorite-shadow);
   }
 
   .search-box svg {

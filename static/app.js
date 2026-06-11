@@ -173,6 +173,7 @@ function renderBooks(books, total) {
     titleLink.textContent = book.series_title;
     card.querySelector(".book-card__date").textContent = formatDate(book.published_at);
     card.style.animationDelay = `${Math.min(index * 18, 240)}ms`;
+    card.classList.toggle("is-favorite", book.is_favorite);
 
     type.textContent = book.volume_label
       || (book.is_standalone
