@@ -705,6 +705,55 @@ def normalize_volume_number(value: str) -> str:
     return f"{normalized_whole}.{fraction}" if separator else normalized_whole
 
 
+def normalize_legacy_title_case(value: str) -> str:
+    letters = [character for character in value if character.isalpha()]
+    if not letters or any(character.islower() for character in letters):
+        return value
+
+    minor_words = {
+        "a",
+        "an",
+        "and",
+        "as",
+        "at",
+        "but",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "nor",
+        "of",
+        "on",
+        "or",
+        "over",
+        "per",
+        "the",
+        "to",
+        "up",
+        "via",
+        "with",
+        "yet",
+    }
+    word_matches = list(re.finditer(r"[A-Za-z]+(?:['’][A-Za-z]+)?", value))
+    if not word_matches:
+        return value
+
+    first_start = word_matches[0].start()
+    last_start = word_matches[-1].start()
+
+    def title_word(match: re.Match[str]) -> str:
+        word = match.group(0).casefold()
+        if (
+            word in minor_words
+            and match.start() not in {first_start, last_start}
+        ):
+            return word
+        return word[:1].upper() + word[1:]
+
+    return re.sub(r"[A-Za-z]+(?:['’][A-Za-z]+)?", title_word, value)
+
+
 def normalize_display_title(value: str) -> str:
     has_pdf = bool(
         re.search(r"\[PDF\]", value, re.IGNORECASE)
@@ -733,7 +782,7 @@ def normalize_display_title(value: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
-    cleaned = " ".join(cleaned.split())
+    cleaned = normalize_legacy_title_case(" ".join(cleaned.split()))
     if has_pdf and not has_epub:
         cleaned = f"{cleaned} PDF"
     return cleaned
@@ -1290,8 +1339,28 @@ def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
 def infer_series_parent(
     url: str,
     parent_hints: list[str] | None = None,
+    download_url: str | None = None,
 ) -> str | None:
     with connect_db() as connection:
+        if download_url:
+            exact_parent = connection.execute(
+                """
+                SELECT sv.series_url
+                FROM series_volumes AS sv
+                WHERE sv.download_url = ?
+                  AND sv.series_url <> ?
+                ORDER BY (
+                    SELECT COUNT(*)
+                    FROM series_volumes AS sibling
+                    WHERE sibling.series_url = sv.series_url
+                ) DESC,
+                sv.series_url
+                LIMIT 1
+                """,
+                (download_url, url),
+            ).fetchone()
+            if exact_parent:
+                return exact_parent["series_url"]
         book = connection.execute(
             "SELECT title FROM books WHERE url = ?",
             (url,),
@@ -1301,6 +1370,12 @@ def infer_series_parent(
         _, volume_label = parse_book_identity(book["title"], url)
         if not volume_label:
             return None
+        catalog_volume_label = re.sub(
+            r"^Vol\.\s+",
+            "Volume ",
+            volume_label,
+            flags=re.IGNORECASE,
+        )
         child_keys = [series_identity_key(book["title"], url)]
         child_keys.extend(
             series_identity_key(hint, url)
@@ -1308,7 +1383,19 @@ def infer_series_parent(
         )
         candidates = connection.execute(
             """
-            SELECT b.title, b.url
+            SELECT b.title,
+                   b.url,
+                   (
+                       SELECT COUNT(*)
+                       FROM series_volumes AS count_volume
+                       WHERE count_volume.series_url = b.url
+                   ) AS volume_count,
+                   EXISTS (
+                       SELECT 1
+                       FROM series_volumes AS matching_volume
+                       WHERE matching_volume.series_url = b.url
+                         AND lower(matching_volume.label) = lower(?)
+                   ) AS has_matching_volume
             FROM books AS b
             WHERE b.entry_type = 'series'
               AND b.url <> ?
@@ -1318,18 +1405,23 @@ def infer_series_parent(
                   WHERE sv.series_url = b.url
               )
             """,
-            (url,),
+            (catalog_volume_label, url),
         ).fetchall()
 
     matches: list[tuple[int, str]] = []
     for candidate in candidates:
         candidate_key = series_identity_key(candidate["title"], candidate["url"])
         candidate_words = candidate_key.split()
-        if (
+        title_prefix_matches = any(
+            child_key.startswith(f"{candidate_key} ")
+            for child_key in child_keys
+        )
+        if title_prefix_matches and (
             len(candidate_words) >= 5
-            and any(
-                child_key.startswith(f"{candidate_key} ")
-                for child_key in child_keys
+            or (
+                len(candidate_words) >= 2
+                and candidate["volume_count"] >= 3
+                and candidate["has_matching_volume"]
             )
         ):
             matches.append((len(candidate_words), candidate["url"]))
@@ -1338,7 +1430,11 @@ def infer_series_parent(
 
 def update_book_details(url: str, details: PostDetails) -> None:
     if details.entry_type == "series" and not details.original_post_url:
-        inferred_parent = infer_series_parent(url, details.parent_hints)
+        inferred_parent = infer_series_parent(
+            url,
+            details.parent_hints,
+            details.download_url,
+        )
         if inferred_parent:
             details.entry_type = "volume"
             details.original_post_url = inferred_parent
@@ -2305,9 +2401,27 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
     if query:
         escaped = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         conditions.append(
-            "(title LIKE ? ESCAPE '\\' OR associated_names LIKE ? ESCAPE '\\')"
+            """
+            (
+                books.title LIKE ? ESCAPE '\\'
+                OR books.associated_names LIKE ? ESCAPE '\\'
+                OR EXISTS (
+                    SELECT 1
+                    FROM books AS parent
+                    WHERE parent.url = books.original_post_url
+                      AND parent.title LIKE ? ESCAPE '\\'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM books AS sibling
+                    WHERE sibling.original_post_url =
+                          COALESCE(books.original_post_url, books.url)
+                      AND sibling.title LIKE ? ESCAPE '\\'
+                )
+            )
+            """
         )
-        params.extend([f"%{escaped}%", f"%{escaped}%"])
+        params.extend([f"%{escaped}%"] * 4)
 
     if entry_filter == "series":
         conditions.append("entry_type = 'series'")
@@ -2357,7 +2471,17 @@ def list_books(
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
                entry_type, original_post_url, download_url, detail_cached_at,
-               associated_names, genres, synopsis
+               associated_names, genres, synopsis,
+               (
+                   SELECT sibling.title
+                   FROM books AS sibling
+                   WHERE sibling.original_post_url =
+                         COALESCE(books.original_post_url, books.url)
+                   ORDER BY sibling.published_at IS NULL,
+                            sibling.published_at DESC,
+                            sibling.id DESC
+                   LIMIT 1
+               ) AS latest_series_title
         FROM books
     """ + where_clause
     params: tuple[Any, ...] = filter_params
@@ -2376,6 +2500,11 @@ def list_books(
         book["associated_names"] = decode_string_list(book["associated_names"])
         book["genres"] = decode_string_list(book["genres"])
         series_title, volume_label = parse_book_identity(book["title"], book["url"])
+        if book["latest_series_title"]:
+            series_title, _ = parse_book_identity(
+                book["latest_series_title"],
+                book["original_post_url"] or book["url"],
+            )
         series_url = (
             book["original_post_url"]
             if book["entry_type"] == "volume"

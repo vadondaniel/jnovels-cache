@@ -260,15 +260,15 @@ class ParserTests(unittest.TestCase):
             ),
             (
                 "DOWNLOAD BACCANO ALL VOLUMES EPUB",
-                "BACCANO",
+                "Baccano",
             ),
             (
                 "DOWNLOAD IN ANOTHER WORLD WITH SMARTPHONE ALL LN VOLUMES EPUB",
-                "IN ANOTHER WORLD WITH SMARTPHONE",
+                "In Another World with Smartphone",
             ),
             (
                 "DOWNLOAD KINGDOM HEARTS ALL VOLUME EPUB",
-                "KINGDOM HEARTS",
+                "Kingdom Hearts",
             ),
         ]
 
@@ -304,7 +304,7 @@ class ParserTests(unittest.TestCase):
                 "DOWNLOAD DEATH MARCH ALL VOLUMES PDF",
                 "https://jnovels.com/download-death-march-all-volume-pdf/",
             ),
-            ("DEATH MARCH PDF", None),
+            ("Death March PDF", None),
         )
 
     def test_does_not_mark_mixed_pdf_epub_entries_as_pdf_only(self):
@@ -884,6 +884,46 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([book["title"] for book in books], ["100% Example"])
         self.assertEqual(count, 1)
 
+    def test_search_matches_latest_title_across_series_family(self):
+        series = server.Book(
+            "DOWNLOAD DEATH MARCH ALL VOLUMES EPUB",
+            "https://jnovels.com/download-death-march-all-volumes-epub/",
+            None,
+            None,
+        )
+        old_volume = server.Book(
+            "Death March kara Hajimaru Isekai Kyousoukyoku Volume 6 EPUB",
+            "https://jnovels.com/death-march-volume-6-epub/",
+            None,
+            "2018-09-19",
+        )
+        latest_volume = server.Book(
+            "Death March to the Parallel World Rhapsody Volume 24 EPUB",
+            "https://jnovels.com/death-march-volume-24-epub/",
+            None,
+            "2025-12-04",
+        )
+        server.upsert_books([series, old_volume, latest_volume])
+        for volume in (old_volume, latest_volume):
+            server.update_book_details(
+                volume.url,
+                server.PostDetails(
+                    "volume",
+                    series.url,
+                    f"https://files.example/{volume.url.rsplit('-', 2)[-2]}",
+                ),
+            )
+
+        matches = server.list_books(
+            "Parallel World Rhapsody",
+            "title_asc",
+        )
+
+        self.assertEqual(
+            {book["url"] for book in matches},
+            {series.url, old_volume.url, latest_volume.url},
+        )
+
     def test_counts_and_pages_books_in_database(self):
         server.upsert_books(
             [
@@ -930,6 +970,89 @@ class DatabaseTests(unittest.TestCase):
             [book["url"] for book in server.list_books("", "title_asc", entry_filter="pending")],
             [pending.url],
         )
+
+    def test_series_display_title_uses_its_latest_volume_title(self):
+        series = server.Book(
+            "Isekai ni Tensei Shitanda kedo Ore All Volumes EPUB",
+            "https://jnovels.com/isekai-ni-tensei-shitanda-kedo-ore-all-volumes-epub/",
+            None,
+            None,
+        )
+        volume = server.Book(
+            "Me a Genius I Was Reborn into Another World and I Think "
+            "They've Got the Wrong Idea! Volume 2 EPUB",
+            "https://jnovels.com/me-a-genius-volume-2-epub/",
+            None,
+            None,
+        )
+        latest_volume = server.Book(
+            "Isekai ni Tensei Shitanda kedo Ore, Tensai tte "
+            "Kanchigai Saretenai Volume 3 EPUB",
+            "https://jnovels.com/isekai-volume-3-epub/",
+            None,
+            "2018-08-10",
+        )
+        server.upsert_books([series, volume, latest_volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series.url, "https://files.example/v2"),
+        )
+        server.update_book_details(
+            latest_volume.url,
+            server.PostDetails("volume", series.url, "https://files.example/v3"),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+
+        self.assertEqual(
+            saved[volume.url]["series_title"],
+            "Isekai ni Tensei Shitanda kedo Ore, Tensai tte Kanchigai Saretenai",
+        )
+        self.assertEqual(
+            saved[series.url]["series_title"],
+            "Isekai ni Tensei Shitanda kedo Ore, Tensai tte Kanchigai Saretenai",
+        )
+        self.assertEqual(saved[volume.url]["volume_label"], "Vol. 2")
+        self.assertEqual(
+            saved[volume.url]["title"],
+            "Me a Genius I Was Reborn into Another World and I Think "
+            "They've Got the Wrong Idea! Volume 2 EPUB",
+        )
+
+    def test_latest_volume_title_replaces_abbreviated_parent_title(self):
+        series = server.Book(
+            "DOWNLOAD DEATH MARCH ALL VOLUMES EPUB",
+            "https://jnovels.com/download-death-march-all-volumes-epub/",
+            None,
+            None,
+        )
+        volume = server.Book(
+            "Death March to the Parallel World Rhapsody Volume 19 EPUB",
+            "https://jnovels.com/death-march-volume-19-epub/",
+            None,
+            None,
+        )
+        server.upsert_books([series, volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series.url, "https://files.example/v19"),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+
+        self.assertEqual(
+            saved[volume.url]["series_title"],
+            "Death March to the Parallel World Rhapsody",
+        )
+        self.assertEqual(
+            saved[series.url]["series_title"],
+            "Death March to the Parallel World Rhapsody",
+        )
+        self.assertEqual(saved[volume.url]["volume_label"], "Vol. 19")
 
     def test_updates_second_pass_details(self):
         book = server.Book("Volume 16", "https://example/book", None, "2026-01-01")
@@ -1090,6 +1213,109 @@ class DatabaseTests(unittest.TestCase):
                 parent_hints=[
                     "DOWNLOAD Isekai ni Tensei Shitanda kedo Ore, Tensai tte "
                     "Kanchigai Saretenai Volume 2 EPUB"
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[child_url]
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], series_url)
+
+    def test_infers_legacy_parent_from_matching_catalog_download(self):
+        series_url = "https://jnovels.com/download-death-march-all-volumes-epub/"
+        child_url = "https://jnovels.com/death-march-volume-5-epub/"
+        download_url = "https://files.example/v5"
+        server.upsert_books(
+            [
+                server.Book(
+                    "DOWNLOAD DEATH MARCH ALL VOLUMES EPUB",
+                    series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Death March kara Hajimaru Isekai Kyousoukyoku Volume 5 EPUB",
+                    child_url,
+                    None,
+                    "2018-05-29",
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 5", download_url, 0)],
+        )
+
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "series",
+                None,
+                download_url,
+                [server.SeriesVolume("Volume 5", download_url, 0)],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[child_url]
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], series_url)
+        self.assertEqual(
+            saved["series_title"],
+            "Death March kara Hajimaru Isekai Kyousoukyoku",
+        )
+
+    def test_infers_short_legacy_parent_when_redirect_and_catalog_urls_differ(self):
+        series_url = "https://jnovels.com/download-death-march-all-volumes-epub/"
+        child_url = "https://jnovels.com/death-march-volume-5-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "DOWNLOAD DEATH MARCH ALL VOLUMES EPUB",
+                    series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Death March kara Hajimaru Isekai Kyousoukyoku Volume 5 EPUB",
+                    child_url,
+                    None,
+                    "2018-05-29",
+                ),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://catalog.example/v1",
+                [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://catalog.example/v{number}",
+                        number - 1,
+                    )
+                    for number in range(1, 7)
+                ],
+            ),
+        )
+
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://legacy-redirect.example/v5",
+                [
+                    server.SeriesVolume(
+                        "Volume 5",
+                        "https://legacy-redirect.example/v5",
+                        0,
+                    )
                 ],
             ),
         )
