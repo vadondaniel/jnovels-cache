@@ -74,6 +74,7 @@ class PostDetails:
     associated_names: list[str] = field(default_factory=list)
     genres: list[str] = field(default_factory=list)
     synopsis: str | None = None
+    parent_hints: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -109,6 +110,10 @@ class PostDetailsParser(HTMLParser):
         self._description_parts: list[str] = []
         self._associated_parts: list[str] = []
         self._genres: list[str] = []
+        self._parent_hints: list[str] = []
+        self._metadata_section: str | None = None
+        self._heading_tag: str | None = None
+        self._heading_parts: list[str] = []
 
     @staticmethod
     def _classes(attrs: dict[str, str | None]) -> set[str]:
@@ -132,10 +137,15 @@ class PostDetailsParser(HTMLParser):
                 self._content_depth = 1
             return
 
-        if tag in {"h4", "h5", "h6"} and "associated" in classes:
-            self._in_associated_heading = True
+        if tag in {"h2", "h3", "h4", "h5", "h6"} and self._content_depth:
+            self._heading_tag = tag
+            self._heading_parts = []
+            if "associated" in classes:
+                self._in_associated_heading = True
         elif tag == "br" and self._associated_depth:
             self._associated_parts.append("\n")
+        elif tag == "br" and self._paragraph_item:
+            self._paragraph_item["parts"].append(" ")
 
         if tag in {"ol", "ul"} and self._content_depth:
             if self._list_depth == 0:
@@ -168,9 +178,20 @@ class PostDetailsParser(HTMLParser):
         elif tag == "li" and self._content_depth and self._list_items:
             self._finish_list_item(self._list_items.pop())
         elif tag == "p" and self._content_depth and self._paragraph_item:
+            paragraph_text = " ".join(
+                "".join(self._paragraph_item["parts"]).split()
+            )
+            self._record_parent_hint(paragraph_text)
+            if not self._description_depth and not self._associated_depth:
+                self._finish_metadata_block(paragraph_text)
             self._finish_list_item(self._paragraph_item)
             self._paragraph_item = None
-        elif tag in {"h4", "h5", "h6"} and self._in_associated_heading:
+        elif tag == self._heading_tag:
+            self._finish_metadata_heading(
+                " ".join("".join(self._heading_parts).split())
+            )
+            self._heading_tag = None
+            self._heading_parts = []
             self._in_associated_heading = False
         elif tag in {"ol", "ul"} and self._content_depth and self._list_depth:
             self._list_depth -= 1
@@ -219,6 +240,8 @@ class PostDetailsParser(HTMLParser):
                 self._release_group = "PDF"
         if self._anchor_href:
             self._anchor_parts.append(data)
+        if self._heading_tag:
+            self._heading_parts.append(data)
         if self._list_items:
             self._list_items[-1]["parts"].append(data)
         elif self._paragraph_item:
@@ -227,6 +250,59 @@ class PostDetailsParser(HTMLParser):
             self._associated_parts.append(data)
         elif self._description_depth and not self._in_associated_heading:
             self._description_parts.append(data)
+
+    def _finish_metadata_heading(self, text: str) -> None:
+        normalized = text.strip(" :").casefold()
+        if normalized in {"synopsis", "description", "summary"}:
+            self._metadata_section = "synopsis"
+        elif normalized in {"associated names", "alternative names", "alternate names"}:
+            self._metadata_section = "associated"
+        elif normalized in {
+            "related series",
+            "genres",
+            "genre",
+            "download",
+            "downloads",
+            "share this",
+            "related",
+        }:
+            self._metadata_section = None
+
+    def _record_parent_hint(self, text: str) -> None:
+        if (
+            re.search(r"\bvolume\s+[0-9]+(?:\.[0-9]+)?\b", text, re.IGNORECASE)
+            and len(text.split()) >= 6
+        ):
+            self._parent_hints.append(text)
+
+    def _finish_metadata_block(self, text: str) -> None:
+        if not text:
+            return
+        marker = re.match(
+            r"^(synopsis|description|summary|associated names|alternative names|"
+            r"alternate names|related series|genres?)\s*[:\-–—]?\s*(.*)$",
+            text,
+            re.IGNORECASE,
+        )
+        if marker:
+            heading = marker.group(1).casefold()
+            remainder = marker.group(2).strip()
+            if heading in {"synopsis", "description", "summary"}:
+                self._metadata_section = "synopsis"
+                if remainder:
+                    self._description_parts.extend([remainder, "\n\n"])
+            elif heading in {"associated names", "alternative names", "alternate names"}:
+                self._metadata_section = "associated"
+                if remainder:
+                    self._associated_parts.extend([remainder, "\n"])
+            else:
+                self._metadata_section = None
+            return
+
+        if self._metadata_section == "synopsis" and not looks_like_download_text(text):
+            self._description_parts.extend([text, "\n\n"])
+        elif self._metadata_section == "associated":
+            self._associated_parts.extend([text, "\n"])
 
     def _finish_anchor(self) -> None:
         href = urllib.parse.urljoin(self.post_url, self._anchor_href or "")
@@ -355,6 +431,7 @@ class PostDetailsParser(HTMLParser):
             associated_names,
             self._genres,
             synopsis,
+            self._parent_hints,
         )
 
 
@@ -464,6 +541,14 @@ def is_external_http_url(value: str) -> bool:
         "jnovels.com",
         "www.jnovels.com",
     }
+
+
+def looks_like_download_text(value: str) -> bool:
+    normalized = " ".join(value.split()).casefold()
+    return bool(
+        re.search(r"\b(?:download|volume|vol\.)\s*(?:link|here|[0-9])", normalized)
+        or normalized.startswith(("available in ", "share this", "like this"))
+    )
 
 
 def canonical_page_url(value: str) -> str:
@@ -620,8 +705,32 @@ def normalize_volume_number(value: str) -> str:
     return f"{normalized_whole}.{fraction}" if separator else normalized_whole
 
 
+def normalize_display_title(value: str) -> str:
+    cleaned = re.sub(
+        r"^(?:\s*\[(?:WEB\s*NOVEL|WEBNOVEL|PDF|EPUB)\]\s*)+",
+        "",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"^\s*DOWNLOAD\s+", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"(?:\s+(?:PDF|EPUB))+\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\s+ALL\s+(?:(?:LN|LIGHT\s+NOVEL)\s+)?VOLUMES?\s*$",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return " ".join(cleaned.split())
+
+
 def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
-    cleaned = re.sub(r"\s+Epub$", "", title, flags=re.IGNORECASE).strip()
+    cleaned = normalize_display_title(title)
+    cleaned = re.sub(r"\s+Epub$", "", cleaned, flags=re.IGNORECASE).strip()
     match = re.search(
         r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
         r"(?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
@@ -1053,7 +1162,63 @@ def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
     return parser.details()
 
 
+def infer_series_parent(
+    url: str,
+    parent_hints: list[str] | None = None,
+) -> str | None:
+    with connect_db() as connection:
+        book = connection.execute(
+            "SELECT title FROM books WHERE url = ?",
+            (url,),
+        ).fetchone()
+        if not book:
+            return None
+        _, volume_label = parse_book_identity(book["title"], url)
+        if not volume_label:
+            return None
+        child_keys = [series_identity_key(book["title"], url)]
+        child_keys.extend(
+            series_identity_key(hint, url)
+            for hint in parent_hints or []
+        )
+        candidates = connection.execute(
+            """
+            SELECT b.title, b.url
+            FROM books AS b
+            WHERE b.entry_type = 'series'
+              AND b.url <> ?
+              AND EXISTS (
+                  SELECT 1
+                  FROM series_volumes AS sv
+                  WHERE sv.series_url = b.url
+              )
+            """,
+            (url,),
+        ).fetchall()
+
+    matches: list[tuple[int, str]] = []
+    for candidate in candidates:
+        candidate_key = series_identity_key(candidate["title"], candidate["url"])
+        candidate_words = candidate_key.split()
+        if (
+            len(candidate_words) >= 5
+            and any(
+                child_key.startswith(f"{candidate_key} ")
+                for child_key in child_keys
+            )
+        ):
+            matches.append((len(candidate_words), candidate["url"]))
+    return max(matches, default=(0, ""))[1] or None
+
+
 def update_book_details(url: str, details: PostDetails) -> None:
+    if details.entry_type == "series" and not details.original_post_url:
+        inferred_parent = infer_series_parent(url, details.parent_hints)
+        if inferred_parent:
+            details.entry_type = "volume"
+            details.original_post_url = inferred_parent
+            details.volumes = []
+
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     associated_names = encode_string_list(details.associated_names)
     genres = encode_string_list(details.genres)
@@ -1098,6 +1263,7 @@ def update_book_details(url: str, details: PostDetails) -> None:
             )
     if details.entry_type == "series":
         replace_series_volumes(url, details.volumes)
+        build_fallback_catalog(url)
         mark_series_metadata_checked(url, now)
         reconcile_series_downloads(url)
     elif details.original_post_url:
@@ -2126,7 +2292,8 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         ).fetchone()
         book_rows = connection.execute(
             """
-            SELECT title, url, download_url, published_at, entry_type
+            SELECT title, url, download_url, published_at, entry_type,
+                   original_post_url
             FROM books
             WHERE download_url IS NOT NULL
             ORDER BY entry_type = 'volume' DESC, published_at DESC
@@ -2142,7 +2309,11 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     for book in book_rows:
         if book["download_url"]:
             exact_downloads.setdefault(book["download_url"], book)
-        if series_identity_key(book["title"], book["url"]) != target_key:
+        if (
+            canonical_page_url(book["original_post_url"] or "") !=
+            canonical_page_url(series_url)
+            and series_identity_key(book["title"], book["url"]) != target_key
+        ):
             continue
         label = extract_catalog_label(book["title"])
         if label:
@@ -2159,6 +2330,25 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
             )
         volume["published_at"] = book["published_at"] if book else None
         volume["post_url"] = book["url"] if book else None
+
+    format_groups = {"pdf", "pdf (light)", "pdf (dark)", "epub"}
+    dated_formats: dict[str, dict[str, Any]] = {}
+    for volume in rows:
+        if (
+            (volume["release_group"] or "").casefold() in format_groups
+            and volume["published_at"]
+        ):
+            dated_formats.setdefault(volume["label"].casefold(), volume)
+    for volume in rows:
+        if (
+            (volume["release_group"] or "").casefold() not in format_groups
+            or volume["published_at"]
+        ):
+            continue
+        dated = dated_formats.get(volume["label"].casefold())
+        if dated:
+            volume["published_at"] = dated["published_at"]
+            volume["post_url"] = dated["post_url"]
     return rows
 
 

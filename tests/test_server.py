@@ -102,6 +102,35 @@ LEGACY_PARAGRAPH_CATALOG_HTML = """
 </article>
 """
 
+LEGACY_INLINE_METADATA_HTML = """
+<article>
+  <div class="post-content clear">
+    <p>Synopsis A book-loving student is reborn in a world where books are rare.</p>
+    <h5 class="seriesother associated">Associated Names</h5>
+    <div id="editassociated">
+      Alternate Bookworm<br>
+      本好きの下剋上
+    </div>
+    <ol><li>Volume 1 <a href="https://files.example/v1">Download</a></li></ol>
+  </div>
+</article>
+"""
+
+LEGACY_HEADING_METADATA_HTML = """
+<article>
+  <div class="post-content clear">
+    <h4>Description</h4>
+    <p>First synopsis paragraph.</p>
+    <p>Second synopsis paragraph.</p>
+    <h4>Alternative Names</h4>
+    <p>Alternate One<br>Alternate Two</p>
+    <h4>Related Series</h4>
+    <p>Unrelated text that must not enter metadata.</p>
+    <ol><li>Volume 1 <a href="https://files.example/v1">Download</a></li></ol>
+  </div>
+</article>
+"""
+
 NESTED_SERIES_HTML = """
 <article>
   <div class="post-content clear">
@@ -205,6 +234,61 @@ class ParserTests(unittest.TestCase):
                 "https://jnovels.com/overlord-volume-14-light-novel-epub/",
             ),
             ("Overlord", "Vol. 14"),
+        )
+
+    def test_removes_legacy_format_tags_from_display_identity(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "[WEBNOVEL][PDF][EPUB] Genius Doctor: Black Belly Miss",
+                "https://jnovels.com/webnovelpdfepub-genius-doctor/",
+            ),
+            ("Genius Doctor: Black Belly Miss", None),
+        )
+        self.assertEqual(
+            server.parse_book_identity(
+                "[PDF][EPUB]The Redo of a Healing Magician Light Novel",
+                "https://jnovels.com/pdfepubthe-redo-of-a-healing-magician-light-novels/",
+            ),
+            ("The Redo of a Healing Magician", None),
+        )
+
+    def test_removes_legacy_catalog_wrappers_from_display_identity(self):
+        cases = [
+            (
+                "Isekai ni Tensei Shitanda kedo Ore All Volumes EPUB",
+                "Isekai ni Tensei Shitanda kedo Ore",
+            ),
+            (
+                "DOWNLOAD BACCANO ALL VOLUMES EPUB",
+                "BACCANO",
+            ),
+            (
+                "DOWNLOAD IN ANOTHER WORLD WITH SMARTPHONE ALL LN VOLUMES EPUB",
+                "IN ANOTHER WORLD WITH SMARTPHONE",
+            ),
+            (
+                "DOWNLOAD KINGDOM HEARTS ALL VOLUME EPUB",
+                "KINGDOM HEARTS",
+            ),
+        ]
+
+        for title, expected in cases:
+            with self.subTest(title=title):
+                self.assertEqual(
+                    server.parse_book_identity(
+                        title,
+                        "https://jnovels.com/example-all-volumes-epub/",
+                    ),
+                    (expected, None),
+                )
+
+    def test_legacy_wrapper_cleanup_preserves_volume_number(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "DOWNLOAD Example Story Volume 3 EPUB",
+                "https://jnovels.com/example-story-volume-3-epub/",
+            ),
+            ("Example Story", "Vol. 3"),
         )
 
     def test_extracts_search_result_metadata(self):
@@ -333,6 +417,33 @@ class ParserTests(unittest.TestCase):
             ],
         )
         self.assertEqual(details.download_url, "https://files.example/epub-1")
+
+    def test_extracts_inline_legacy_synopsis_and_associated_names(self):
+        parser = server.PostDetailsParser("https://jnovels.com/bookworm/")
+        parser.feed(LEGACY_INLINE_METADATA_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            details.synopsis,
+            "A book-loving student is reborn in a world where books are rare.",
+        )
+        self.assertEqual(
+            details.associated_names,
+            ["Alternate Bookworm", "本好きの下剋上"],
+        )
+
+    def test_extracts_heading_based_legacy_metadata_until_next_section(self):
+        parser = server.PostDetailsParser("https://jnovels.com/legacy-metadata/")
+        parser.feed(LEGACY_HEADING_METADATA_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            details.synopsis,
+            "First synopsis paragraph.\n\nSecond synopsis paragraph.",
+        )
+        self.assertEqual(details.associated_names, ["Alternate One Alternate Two"])
 
     def test_ignores_self_referential_original_post_link(self):
         post_url = "https://jnovels.com/example-volume-2-epub/"
@@ -786,6 +897,93 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["published_at"], "2022-08-15")
         self.assertEqual(saved["post_url"], series_url)
 
+    def test_infers_parent_for_broken_self_linked_volume_post(self):
+        series_url = "https://jnovels.com/isekai-ni-tensei-shitanda-kedo-ore-all-volumes-epub/"
+        child_url = (
+            "https://jnovels.com/me-a-genius-i-was-reborn-into-another-world-"
+            "and-i-think-theyve-got-the-wrong-idea-volume-2-epub/"
+        )
+        server.upsert_books(
+            [
+                server.Book(
+                    "Isekai ni Tensei Shitanda kedo Ore All Volumes EPUB",
+                    series_url,
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Me, a Genius? I Was Reborn into Another World and I Think "
+                    "They've Got the Wrong Idea! Volume 2 EPUB",
+                    child_url,
+                    None,
+                    None,
+                ),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/child-v2",
+                parent_hints=[
+                    "DOWNLOAD Isekai ni Tensei Shitanda kedo Ore, Tensai tte "
+                    "Kanchigai Saretenai Volume 2 EPUB"
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[child_url]
+        self.assertEqual(saved["entry_type"], "volume")
+        self.assertEqual(saved["original_post_url"], series_url)
+
+    def test_parent_refresh_merges_cached_child_missing_from_source_catalog(self):
+        series_url = "https://jnovels.com/example-all-volumes-epub/"
+        child_url = "https://jnovels.com/example-volume-3-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", series_url, None, None),
+                server.Book("Example Volume 3 EPUB", child_url, None, "2026-01-03"),
+            ]
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails("volume", series_url, "https://files.example/v3"),
+        )
+
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(series_url)],
+            ["Volume 1", "Volume 2", "Volume 3"],
+        )
+
     def test_catalog_dates_match_series_url_variants_by_identity_and_label(self):
         catalog_url = "https://jnovels.com/example-series-light-novel-epub/"
         volume = server.Book(
@@ -811,6 +1009,71 @@ class DatabaseTests(unittest.TestCase):
         saved = server.list_series_volumes(catalog_url)[0]
         self.assertEqual(saved["published_at"], "2026-06-09")
         self.assertEqual(saved["post_url"], volume.url)
+
+    def test_catalog_dates_use_direct_parent_when_child_title_differs(self):
+        series_url = "https://jnovels.com/example-original-title-epub/"
+        volume = server.Book(
+            "Completely Different English Title Volume 2 Epub",
+            "https://jnovels.com/different-title-volume-2-epub/",
+            None,
+            "2026-06-09",
+        )
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/post-download",
+            ),
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 2", "https://files.example/catalog-download", 0)],
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+        self.assertEqual(saved["published_at"], "2026-06-09")
+        self.assertEqual(saved["post_url"], volume.url)
+
+    def test_catalog_date_is_shared_by_pdf_and_epub_variants(self):
+        series_url = "https://jnovels.com/example-webnovel/"
+        epub_download = "https://files.example/epub"
+        server.upsert_books(
+            [server.Book("Example Webnovel", series_url, None, "2026-06-09")]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                epub_download,
+                [
+                    server.SeriesVolume(
+                        "Complete edition",
+                        "https://files.example/pdf",
+                        0,
+                        "PDF",
+                    ),
+                    server.SeriesVolume(
+                        "Complete edition",
+                        epub_download,
+                        1,
+                        "EPUB",
+                    ),
+                ],
+            ),
+        )
+
+        saved = server.list_series_volumes(series_url)
+        self.assertEqual(
+            [volume["published_at"] for volume in saved],
+            ["2026-06-09", "2026-06-09"],
+        )
+        self.assertEqual(
+            [volume["post_url"] for volume in saved],
+            [series_url, series_url],
+        )
 
     def test_uses_best_matching_catalog_when_source_parent_has_no_catalog(self):
         correct_series = "https://jnovels.com/download-example-series-all-volumes-epub/"
