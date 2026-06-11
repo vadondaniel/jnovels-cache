@@ -1007,6 +1007,59 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(server.list_books("", "title_asc")[0]["volume_count"], 2)
 
+    def test_card_catalog_count_uses_current_download_category(self):
+        series_url = "https://jnovels.com/example-series/"
+        child_url = "https://jnovels.com/example-series-volume-2/"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 2 EPUB", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/official-1",
+                [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/official-{number}",
+                        number - 1,
+                        "Official translation",
+                    )
+                    for number in range(1, 4)
+                ]
+                + [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/fan-{number}",
+                        number + 2,
+                        "Fan translation",
+                    )
+                    for number in range(1, 3)
+                ],
+            ),
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/fan-2",
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+
+        self.assertEqual(saved[series_url]["volume_count"], 5)
+        self.assertEqual(saved[series_url]["catalog_count"], 3)
+        self.assertEqual(saved[child_url]["volume_count"], 5)
+        self.assertEqual(saved[child_url]["catalog_count"], 2)
+
     def test_title_search_escapes_sql_wildcards(self):
         server.upsert_books(
             [

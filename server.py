@@ -46,6 +46,7 @@ _catalog_index_cache: tuple[
     dict[str, tuple[str, int]],
     dict[str, tuple[str, int]],
     dict[str, int],
+    dict[str, int],
 ] | None = None
 
 
@@ -1049,6 +1050,7 @@ def get_catalog_indexes() -> tuple[
     dict[str, tuple[str, int]],
     dict[str, tuple[str, int]],
     dict[str, int],
+    dict[str, int],
 ]:
     global _catalog_index_cache
     with _catalog_index_lock:
@@ -1058,10 +1060,12 @@ def get_catalog_indexes() -> tuple[
         with connect_db() as connection:
             rows = connection.execute(
                 """
-                SELECT sv.series_url,
-                       sv.download_url,
-                       counts.volume_count,
-                       b.title
+        SELECT sv.series_url,
+               sv.download_url,
+               sv.label,
+               sv.release_group,
+               counts.volume_count,
+               b.title
                 FROM series_volumes AS sv
                 JOIN (
                     SELECT series_url, COUNT(*) AS volume_count
@@ -1076,6 +1080,7 @@ def get_catalog_indexes() -> tuple[
         catalog_index: dict[str, tuple[str, int]] = {}
         download_index: dict[str, tuple[str, int]] = {}
         volume_counts: dict[str, int] = {}
+        category_labels: dict[tuple[str, str], set[str]] = {}
         for row in rows:
             candidate = (row["series_url"], row["volume_count"])
             volume_counts[row["series_url"]] = row["volume_count"]
@@ -1083,23 +1088,43 @@ def get_catalog_indexes() -> tuple[
             if key and candidate[1] > catalog_index.get(key, ("", 0))[1]:
                 catalog_index[key] = candidate
             download_index.setdefault(row["download_url"], candidate)
+            category_key = (
+                row["series_url"],
+                (row["release_group"] or "").casefold(),
+            )
+            category_labels.setdefault(category_key, set()).add(
+                row["label"].casefold()
+            )
+
+        download_category_counts = {
+            row["download_url"]: len(
+                category_labels[
+                    (
+                        row["series_url"],
+                        (row["release_group"] or "").casefold(),
+                    )
+                ]
+            )
+            for row in rows
+        }
 
         _catalog_index_cache = (
             DB_PATH,
             catalog_index,
             download_index,
             volume_counts,
+            download_category_counts,
         )
-        return catalog_index, download_index, volume_counts
+        return catalog_index, download_index, volume_counts, download_category_counts
 
 
 def get_series_catalog_index() -> dict[str, tuple[str, int]]:
-    catalog_index, _, _ = get_catalog_indexes()
+    catalog_index, _, _, _ = get_catalog_indexes()
     return catalog_index
 
 
 def get_download_catalog_index() -> dict[str, tuple[str, int]]:
-    _, download_index, _ = get_catalog_indexes()
+    _, download_index, _, _ = get_catalog_indexes()
     return download_index
 
 
@@ -2694,7 +2719,12 @@ def list_books(
         rows = connection.execute(sql, params).fetchall()
 
     books = [dict(row) for row in rows]
-    catalog_index, download_catalog_index, volume_counts = get_catalog_indexes()
+    (
+        catalog_index,
+        download_catalog_index,
+        volume_counts,
+        download_category_counts,
+    ) = get_catalog_indexes()
 
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
@@ -2720,6 +2750,10 @@ def list_books(
         book["volume_label"] = volume_label
         book["series_url"] = series_url
         book["volume_count"] = volume_counts.get(series_url or "", 0)
+        book["catalog_count"] = download_category_counts.get(
+            book["download_url"] or "",
+            book["volume_count"],
+        )
         title_and_url = f"{book['title']} {book['url']}".casefold()
         book["catalog_kind"] = (
             "downloads"
