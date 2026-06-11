@@ -876,6 +876,48 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(books[0]["title"], "New title")
         self.assertEqual(books[0]["image_url"], "https://img/1.jpg")
 
+    def test_release_sort_preserves_source_order_within_same_date(self):
+        newest = server.Book(
+            "Zeta",
+            "https://example/newest",
+            None,
+            "2026-06-09",
+        )
+        oldest = server.Book(
+            "Alpha",
+            "https://example/oldest",
+            None,
+            "2026-06-09",
+        )
+
+        server.upsert_books([newest, oldest], source_page=1)
+
+        descending = server.list_books("", "published_desc")
+        ascending = server.list_books("", "published_asc")
+
+        self.assertEqual(
+            [book["url"] for book in descending],
+            [newest.url, oldest.url],
+        )
+        self.assertEqual(
+            [book["url"] for book in ascending],
+            [oldest.url, newest.url],
+        )
+
+    def test_refresh_updates_same_day_source_order(self):
+        first = server.Book("First", "https://example/first", None, "2026-06-09")
+        second = server.Book("Second", "https://example/second", None, "2026-06-09")
+        latest = server.Book("Latest", "https://example/latest", None, "2026-06-09")
+        server.upsert_books([first, second], source_page=1)
+
+        server.upsert_books([latest, second, first], source_page=1)
+
+        books = server.list_books("", "published_desc")
+        self.assertEqual(
+            [book["url"] for book in books],
+            [latest.url, second.url, first.url],
+        )
+
     def test_keeps_pdf_only_entry_without_epub_counterpart(self):
         pdf = server.Book(
             "Example Story Volume 1 PDF",

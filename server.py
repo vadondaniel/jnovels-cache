@@ -1167,7 +1167,8 @@ def initialize_db() -> None:
                 detail_last_error TEXT,
                 associated_names TEXT,
                 genres TEXT,
-                synopsis TEXT
+                synopsis TEXT,
+                source_order INTEGER
             );
 
             CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
@@ -1214,6 +1215,7 @@ def initialize_db() -> None:
             "associated_names": "ALTER TABLE books ADD COLUMN associated_names TEXT",
             "genres": "ALTER TABLE books ADD COLUMN genres TEXT",
             "synopsis": "ALTER TABLE books ADD COLUMN synopsis TEXT",
+            "source_order": "ALTER TABLE books ADD COLUMN source_order INTEGER",
         }
         for column, statement in migrations.items():
             if column not in existing_columns:
@@ -1262,7 +1264,7 @@ def initialize_db() -> None:
     cleanup_misclassified_series_tracking()
 
 
-def upsert_books(books: list[Book]) -> int:
+def upsert_books(books: list[Book], source_page: int | None = None) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect_db() as connection:
         existing_rows = connection.execute(
@@ -1287,17 +1289,29 @@ def upsert_books(books: list[Book]) -> int:
         before = connection.total_changes
         connection.executemany(
             """
-            INSERT INTO books (title, url, image_url, published_at, cached_at, last_seen_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO books (
+                title, url, image_url, published_at, cached_at, last_seen_at,
+                source_order
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(url) DO UPDATE SET
                 title = excluded.title,
                 image_url = excluded.image_url,
                 published_at = excluded.published_at,
-                last_seen_at = excluded.last_seen_at
+                last_seen_at = excluded.last_seen_at,
+                source_order = COALESCE(excluded.source_order, books.source_order)
             """,
             [
-                (book.title, book.url, book.image_url, book.published_at, now, now)
-                for book in books
+                (
+                    book.title,
+                    book.url,
+                    book.image_url,
+                    book.published_at,
+                    now,
+                    now,
+                    source_page * 1000 + position if source_page is not None else None,
+                )
+                for position, book in enumerate(books)
             ],
         )
         prune_pdf_duplicates(connection=connection)
@@ -2394,7 +2408,7 @@ def run_sync(
             known_urls = get_cached_urls()
 
             def persist_page(page: int, page_books: list[Book]) -> None:
-                upsert_books(page_books)
+                upsert_books(page_books, source_page=page)
                 cached_urls = get_cached_urls()
                 page_books[:] = [
                     book for book in page_books if book.url in cached_urls
@@ -2685,16 +2699,27 @@ def list_books(
     entry_filter: str = "all",
 ) -> list[dict[str, Any]]:
     order_by = {
-        "published_desc": "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC",
-        "published_asc": "published_at IS NULL, published_at ASC, title COLLATE NOCASE, id ASC",
+        "published_desc": (
+            "published_at IS NULL, published_at DESC, "
+            "source_order IS NULL, source_order ASC, id ASC"
+        ),
+        "published_asc": (
+            "published_at IS NULL, published_at ASC, "
+            "source_order IS NULL, source_order DESC, id DESC"
+        ),
         "title_asc": "title COLLATE NOCASE ASC, id ASC",
         "title_desc": "title COLLATE NOCASE DESC, id DESC",
         "cached_desc": "cached_at DESC, title COLLATE NOCASE, id DESC",
-    }.get(sort, "published_at IS NULL, published_at DESC, title COLLATE NOCASE, id DESC")
+    }.get(
+        sort,
+        "published_at IS NULL, published_at DESC, "
+        "source_order IS NULL, source_order ASC, id ASC",
+    )
 
     where_clause, filter_params = book_filter(query, entry_filter)
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
+               source_order,
                entry_type, original_post_url, download_url, detail_cached_at,
                associated_names, genres, synopsis,
                (
