@@ -1167,6 +1167,49 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([book["url"] for book in books], [matching.url])
         self.assertEqual(server.count_books("kingdom, realist! 21"), 1)
 
+    def test_quoted_search_terms_require_a_contiguous_phrase(self):
+        exact_phrase = server.Book(
+            "Hello World After Story",
+            "https://example/exact-phrase",
+            None,
+            None,
+        )
+        separated_words = server.Book(
+            "Hello Again, Wonderful World",
+            "https://example/separated-words",
+            None,
+            None,
+        )
+        server.upsert_books([exact_phrase, separated_words])
+
+        quoted = server.list_books('"hello world"', "title_asc")
+        unquoted = server.list_books("hello world", "title_asc")
+
+        self.assertEqual([book["url"] for book in quoted], [exact_phrase.url])
+        self.assertEqual(
+            [book["url"] for book in unquoted],
+            [separated_words.url, exact_phrase.url],
+        )
+
+    def test_quoted_phrases_can_be_combined_with_lenient_terms(self):
+        matching = server.Book(
+            "How a Realist Hero Rebuilt the Kingdom Volume 21",
+            "https://example/quoted-matching",
+            None,
+            None,
+        )
+        wrong_phrase = server.Book(
+            "How the Kingdom Was Rebuilt by a Realist Hero Volume 21",
+            "https://example/quoted-wrong-phrase",
+            None,
+            None,
+        )
+        server.upsert_books([matching, wrong_phrase])
+
+        books = server.list_books('hero "rebuilt the kingdom" 21', "title_asc")
+
+        self.assertEqual([book["url"] for book in books], [matching.url])
+
     def test_numeric_search_term_does_not_match_every_series_sibling(self):
         series = server.Book(
             "Example Series All Volumes EPUB",

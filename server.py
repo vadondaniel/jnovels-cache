@@ -2999,12 +2999,21 @@ def start_interrupted_sync_recovery() -> bool:
     return True
 
 
+def parse_search_terms(query: str) -> list[str]:
+    terms: list[str] = []
+    for match in re.finditer(r'"([^"]+)"|([\w%\\]+)', query, flags=re.UNICODE):
+        quoted, unquoted = match.groups()
+        term = " ".join(quoted.split()) if quoted is not None else unquoted
+        if term:
+            terms.append(term)
+    return terms
+
+
 def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, ...]]:
     conditions: list[str] = []
     params: list[str] = []
     if query:
-        terms = re.findall(r"[\w%\\]+", query, flags=re.UNICODE)
-        for term in terms:
+        for term in parse_search_terms(query):
             escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             if term.isdecimal():
                 conditions.append(
