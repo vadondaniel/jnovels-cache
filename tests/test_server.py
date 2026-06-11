@@ -2734,6 +2734,107 @@ class SyncTests(unittest.TestCase):
         )
         self.assertEqual(fetch.call_args_list, [call(1), call(2), call(3), call(4), call(5)])
 
+    def test_extend_uses_scanned_frontier_instead_of_retained_entry_count(self):
+        known_url = "https://jnovels.com/known/"
+
+        def page(number):
+            if number == 1 or 904 <= number <= 906:
+                return [server.Book("Known", known_url, None, None)]
+            if number == 907:
+                return []
+            self.fail(f"Unexpected page {number}")
+
+        with (
+            patch.object(server, "fetch_page", side_effect=page) as fetch,
+            patch.object(server.time, "sleep"),
+        ):
+            books = server.collect_sync_books(
+                "extend",
+                start_page=1,
+                max_pages=20,
+                delay=0.5,
+                known_urls={known_url},
+                cached_frontier=906,
+            )
+
+        self.assertEqual(books, [])
+        self.assertEqual(
+            fetch.call_args_list,
+            [call(1), call(904), call(905), call(906), call(907)],
+        )
+
+    def test_extend_crosses_excluded_gap_before_counting_new_pages(self):
+        known_url = "https://jnovels.com/known/"
+
+        def page(number):
+            if number == 1:
+                return [server.Book("Known", known_url, None, None)]
+            if 2 <= number <= 5:
+                return [
+                    server.Book(
+                        f"Excluded {number}",
+                        f"https://jnovels.com/excluded-{number}/",
+                        None,
+                        None,
+                    )
+                ]
+            return [
+                server.Book(
+                    f"New {number}",
+                    f"https://jnovels.com/new-{number}/",
+                    None,
+                    None,
+                )
+            ]
+
+        def exclude_page(_page, books):
+            books[:] = [
+                book for book in books if not book.url.startswith("https://jnovels.com/excluded-")
+            ]
+
+        with (
+            patch.object(server, "fetch_page", side_effect=page) as fetch,
+            patch.object(server.time, "sleep"),
+        ):
+            books = server.collect_sync_books(
+                "extend",
+                start_page=1,
+                max_pages=2,
+                delay=0.5,
+                known_urls={known_url},
+                on_page=exclude_page,
+                cached_frontier=4,
+            )
+
+        self.assertEqual(
+            [book.url for book in books],
+            [
+                "https://jnovels.com/new-6/",
+                "https://jnovels.com/new-7/",
+            ],
+        )
+        self.assertEqual(
+            fetch.call_args_list,
+            [call(1), call(2), call(3), call(4), call(5), call(6), call(7)],
+        )
+
+    def test_frontier_advances_once_for_repeated_observed_front_shift(self):
+        source_orders = {
+            "https://jnovels.com/old-a/": 1000,
+            "https://jnovels.com/old-b/": 1001,
+        }
+        observed = server.observed_source_page_shift(21, source_orders)
+        frontier, applied = server.apply_observed_front_shift(906, 0, observed)
+        frontier, applied = server.apply_observed_front_shift(
+            frontier,
+            applied,
+            server.observed_source_page_shift(21, source_orders),
+        )
+
+        self.assertEqual(observed, 20)
+        self.assertEqual(frontier, 926)
+        self.assertEqual(applied, 20)
+
 
 if __name__ == "__main__":
     unittest.main()

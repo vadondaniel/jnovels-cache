@@ -1337,6 +1337,55 @@ def delete_metadata(key: str) -> None:
         connection.execute("DELETE FROM metadata WHERE key = ?", (key,))
 
 
+def get_search_scan_frontier() -> int:
+    value = get_metadata().get("search_scan_frontier")
+    try:
+        return max(int(value or 0), 0)
+    except ValueError:
+        return 0
+
+
+def get_book_source_orders(urls: list[str]) -> dict[str, int]:
+    if not urls:
+        return {}
+    placeholders = ", ".join("?" for _ in urls)
+    with connect_db() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT url, source_order
+            FROM books
+            WHERE url IN ({placeholders})
+              AND source_order IS NOT NULL
+            """,
+            urls,
+        ).fetchall()
+    return {row["url"]: row["source_order"] for row in rows}
+
+
+def observed_source_page_shift(
+    current_page: int,
+    source_orders: dict[str, int],
+) -> int:
+    return max(
+        (
+            current_page - source_order // 1000
+            for source_order in source_orders.values()
+            if current_page > source_order // 1000
+        ),
+        default=0,
+    )
+
+
+def apply_observed_front_shift(
+    frontier: int,
+    applied_shift: int,
+    observed_shift: int,
+) -> tuple[int, int]:
+    if observed_shift <= applied_shift:
+        return frontier, applied_shift
+    return frontier + observed_shift - applied_shift, observed_shift
+
+
 def get_metadata(
     *,
     connection: sqlite3.Connection | None = None,
@@ -2253,15 +2302,18 @@ def collect_sync_books(
     delay: float,
     known_urls: set[str],
     on_page: Callable[[int, list[Book]], None] | None = None,
+    cached_frontier: int = 0,
 ) -> list[Book]:
     collected: list[Book] = []
     fetched_pages: dict[int, list[Book]] = {}
+    source_page_had_results: dict[int, bool] = {}
 
     def fetch(page: int) -> list[Book]:
         if page not in fetched_pages:
             sync_state["page"] = page
             fetched_pages[page] = fetch_page(page)
-            if not fetched_pages[page]:
+            source_page_had_results[page] = bool(fetched_pages[page])
+            if not source_page_had_results[page]:
                 sync_state["search_end_page"] = page
             sync_state["pages_completed"] += 1
             sync_state["items_seen"] += len(fetched_pages[page])
@@ -2279,7 +2331,7 @@ def collect_sync_books(
     if mode == "catchup":
         for page in range(1, max_pages + 1):
             books = fetch(page)
-            if not books:
+            if not source_page_had_results[page]:
                 break
             page_had_known = any(book.url in known_urls for book in books)
             add_new(books)
@@ -2293,7 +2345,7 @@ def collect_sync_books(
         if not known_urls:
             for page in range(1, max_pages + 1):
                 books = fetch(page)
-                if not books:
+                if not source_page_had_results[page]:
                     break
                 add_new(books)
                 if page < max_pages:
@@ -2304,7 +2356,7 @@ def collect_sync_books(
         page_size = 0
         for page in range(1, min(max_pages, 10) + 1):
             books = fetch(page)
-            if not books:
+            if not source_page_had_results[page]:
                 return collected
             page_size = max(page_size, len(books))
             page_had_known = any(book.url in known_urls for book in books)
@@ -2317,28 +2369,16 @@ def collect_sync_books(
         if page_size == 0:
             return collected
 
-        estimated_frontier = max(
-            first_known_page + 1,
-            (len(known_urls) + page_size - 1) // page_size,
+        estimated_frontier = cached_frontier or (
+            (len(known_urls) + page_size - 1) // page_size
         )
+        estimated_frontier = max(first_known_page + 1, estimated_frontier)
         candidate_page = max(first_known_page + 1, estimated_frontier - 2)
-        candidate_books = fetch(candidate_page)
-        while (
-            candidate_page > first_known_page + 1
-            and not any(book.url in known_urls for book in candidate_books)
-        ):
-            candidate_page -= 1
-            candidate_books = fetch(candidate_page)
-
-        page = (
-            candidate_page + 1
-            if any(book.url in known_urls for book in candidate_books)
-            else first_known_page + 1
-        )
+        page = candidate_page
         uncached_pages_added = 0
         while uncached_pages_added < max_pages:
             books = fetch(page)
-            if not books:
+            if not source_page_had_results[page]:
                 break
             new_count = add_new(books)
             if new_count:
@@ -2351,7 +2391,7 @@ def collect_sync_books(
     for offset in range(max_pages):
         page = start_page + offset
         books = fetch(page)
-        if not books:
+        if not source_page_had_results[page]:
             break
         collected.extend(books)
         sync_state["new_items"] += sum(book.url not in known_urls for book in books)
@@ -2406,9 +2446,24 @@ def run_sync(
             detail_urls = get_incomplete_detail_urls(max_pages)
         else:
             known_urls = get_cached_urls()
+            scan_frontier = get_search_scan_frontier()
+            applied_front_shift = 0
 
             def persist_page(page: int, page_books: list[Book]) -> None:
+                nonlocal applied_front_shift, scan_frontier
+                previous_orders = get_book_source_orders(
+                    [book.url for book in page_books]
+                )
+                observed_shift = observed_source_page_shift(page, previous_orders)
+                scan_frontier, applied_front_shift = apply_observed_front_shift(
+                    scan_frontier,
+                    applied_front_shift,
+                    observed_shift,
+                )
                 upsert_books(page_books, source_page=page)
+                if page_books and page <= scan_frontier + 1:
+                    scan_frontier = max(scan_frontier, page)
+                    set_metadata("search_scan_frontier", str(scan_frontier))
                 cached_urls = get_cached_urls()
                 page_books[:] = [
                     book for book in page_books if book.url in cached_urls
@@ -2427,6 +2482,7 @@ def run_sync(
                 delay,
                 known_urls,
                 persist_page,
+                scan_frontier,
             )
             cached_urls = get_cached_urls()
             detail_urls = list(
