@@ -20,6 +20,7 @@ const validFilters = new Set(["all", "series", "volumes", "pending"]);
 
 const elements = {
   search: document.querySelector("#search"),
+  sourceSearch: document.querySelector("#source-search"),
   sort: document.querySelector("#sort"),
   grid: document.querySelector("#book-grid"),
   count: document.querySelector("#result-count"),
@@ -92,6 +93,13 @@ function updateFilterButtons() {
   elements.entryFilters.hidden = availableCategoryCount < 2;
 }
 
+function updateSourceSearchLink() {
+  const url = new URL("https://jnovels.com/");
+  const query = elements.search.value.trim();
+  url.searchParams.set("s", query ? `epub ${query}` : "epub");
+  elements.sourceSearch.href = url;
+}
+
 function applyViewFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const page = Number.parseInt(params.get("page") || "1", 10);
@@ -102,6 +110,7 @@ function applyViewFromUrl() {
   elements.sort.value = validSorts.has(sort) ? sort : defaultSort;
   state.filter = validFilters.has(entryFilter) ? entryFilter : "all";
   state.page = Number.isNaN(page) ? 1 : Math.max(page, 1);
+  updateSourceSearchLink();
   updateFilterButtons();
 }
 
@@ -843,6 +852,7 @@ async function startPageLoadCatchup() {
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.page = 1;
+  updateSourceSearchLink();
   state.searchTimer = setTimeout(
     () => loadBooks({ historyMode: "replace" }).catch((error) => showToast(error.message, true)),
     160,
