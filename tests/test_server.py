@@ -90,6 +90,38 @@ LEGACY_WEBNOVEL_HTML = """
 </article>
 """
 
+LEGACY_BARE_DOWNLOADS_HTML = """
+<article>
+  <div class="post-content clear">
+    <ol>
+      <li>VOLUME 01 — <a href="https://files.invalid/pdf-1">PDF</a> |
+          <a href="https://enagato.com/epub-1">EPUB</a></li>
+      <li>VOLUME 02 — <a href="https://files.invalid/pdf-2">PDF</a> |
+          <a href="https://enagato.com/epub-2">EPUB</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+LEGACY_NAMED_DOWNLOADS_HTML = """
+<article>
+  <div class="post-content clear">
+    <ol>
+      <li><a href="https://enagato.com/one">Kingdom Hearts: The Novel</a></li>
+      <li><a href="https://enagato.com/two">Kingdom Hearts: Chain of Memories</a></li>
+    </ol>
+  </div>
+</article>
+"""
+
+LEGACY_FORUM_DOWNLOAD_HTML = """
+<article>
+  <div class="post-content clear">
+    <p><a href="https://mp4directs.com/forums/example.123/">EXAMPLE SERIES</a></p>
+  </div>
+</article>
+"""
+
 LEGACY_PARAGRAPH_CATALOG_HTML = """
 <article>
   <div class="post-content clear">
@@ -523,6 +555,66 @@ class ParserTests(unittest.TestCase):
             [
                 ("Volume 1", "https://files.example/one"),
                 ("Volume 5", "https://files.example/five"),
+            ],
+        )
+
+    def test_extracts_epub_from_legacy_pdf_epub_list_items(self):
+        parser = server.PostDetailsParser("https://jnovels.com/legacy/")
+        parser.feed(LEGACY_BARE_DOWNLOADS_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            details.volumes,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://enagato.com/epub-1",
+                    0,
+                    "EPUB",
+                ),
+                server.SeriesVolume(
+                    "Volume 2",
+                    "https://enagato.com/epub-2",
+                    1,
+                    "EPUB",
+                ),
+            ],
+        )
+        self.assertEqual(details.download_url, "https://enagato.com/epub-1")
+
+    def test_extracts_named_legacy_download_list(self):
+        parser = server.PostDetailsParser("https://jnovels.com/kingdom-hearts/")
+        parser.feed(LEGACY_NAMED_DOWNLOADS_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in details.volumes],
+            [
+                ("Kingdom Hearts: The Novel", "https://enagato.com/one"),
+                ("Kingdom Hearts: Chain of Memories", "https://enagato.com/two"),
+            ],
+        )
+
+    def test_accepts_legacy_forum_landing_page_as_download(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example/")
+        parser.feed(LEGACY_FORUM_DOWNLOAD_HTML)
+
+        details = parser.details()
+
+        self.assertEqual(
+            details.download_url,
+            "https://mp4directs.com/forums/example.123/",
+        )
+        self.assertEqual(
+            details.volumes,
+            [
+                server.SeriesVolume(
+                    "Complete edition",
+                    "https://mp4directs.com/forums/example.123/",
+                    0,
+                )
             ],
         )
 
@@ -1358,6 +1450,67 @@ class DatabaseTests(unittest.TestCase):
             ["Volume 1", "Volume 2", "Volume 3"],
         )
 
+    def test_cleanup_reparents_children_of_misclassified_series_volume(self):
+        correct_parent = "https://jnovels.com/example-all-volumes-epub/"
+        wrong_parent = "https://jnovels.com/example-volume-10-epub/"
+        child_url = "https://jnovels.com/example-volume-11-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", correct_parent, None, None),
+                server.Book("Example Volume 10 EPUB", wrong_parent, None, None),
+                server.Book("Example Volume 11 EPUB", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            wrong_parent,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v10",
+                [
+                    server.SeriesVolume(
+                        "Volume 11",
+                        "https://files.example/v11",
+                        0,
+                    )
+                ],
+            ),
+        )
+        server.update_book_details(
+            wrong_parent,
+            server.PostDetails(
+                "volume",
+                correct_parent,
+                "https://files.example/v10",
+            ),
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "volume",
+                wrong_parent,
+                "https://files.example/v11",
+            ),
+        )
+
+        self.assertGreater(server.cleanup_misclassified_series_tracking(), 0)
+
+        with server.connect_db() as connection:
+            child = connection.execute(
+                "SELECT original_post_url FROM books WHERE url = ?",
+                (child_url,),
+            ).fetchone()
+            wrong_status = connection.execute(
+                "SELECT 1 FROM series_status WHERE series_url = ?",
+                (wrong_parent,),
+            ).fetchone()
+        self.assertEqual(child["original_post_url"], correct_parent)
+        self.assertIsNone(wrong_status)
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(correct_parent)],
+            ["Volume 10", "Volume 11"],
+        )
+
     def test_catalog_dates_match_series_url_variants_by_identity_and_label(self):
         catalog_url = "https://jnovels.com/example-series-light-novel-epub/"
         volume = server.Book(
@@ -1688,6 +1841,32 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(health["stale_series"], 0)
         self.assertEqual(health["refreshable_series"], 1)
+
+    def test_unavailable_series_keeps_catalog_without_rejoining_refresh_queue(self):
+        series_url = "https://jnovels.com/dead-series-page/"
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        server.mark_series_unavailable(series_url)
+        server.initialize_db()
+
+        self.assertEqual(server.get_series_refresh_urls(10), [])
+        self.assertEqual(
+            server.get_cache_health(),
+            {
+                "pending_details": 0,
+                "failed_retries": 0,
+                "paused_retries": 0,
+                "stale_series": 0,
+                "refreshable_series": 0,
+            },
+        )
+        self.assertEqual(
+            [volume["label"] for volume in server.list_series_volumes(series_url)],
+            ["Volume 1"],
+        )
 
     def test_legacy_reparse_migration_normalizes_and_queues_old_formats(self):
         url = "https://jnovels.com/webnovelpdfepub-example/"

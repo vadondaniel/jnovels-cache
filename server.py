@@ -35,7 +35,10 @@ AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
 SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
-EXCLUDED_SEARCH_PATHS = {"/light-novel-epub-jp/"}
+EXCLUDED_SEARCH_PATHS = {
+    "/light-novel-epub-jp/",
+    "/top-light-novels-to-read/",
+}
 
 _catalog_index_lock = threading.Lock()
 _catalog_index_cache: tuple[
@@ -336,13 +339,22 @@ class PostDetailsParser(HTMLParser):
 
         if not is_external_http_url(href):
             return
+        if normalized in {"pdf", "epub"}:
+            self._release_group = normalized.upper()
         catalog_label = extract_catalog_label(text)
-        if self._list_items and ("download" in normalized or catalog_label):
+        legacy_download = is_legacy_download_url(href)
+        if self._list_items and (
+            "download" in normalized
+            or catalog_label
+            or legacy_download
+        ):
             self._list_items[-1]["download_url"] = href
         elif self._paragraph_item:
             self._paragraph_item["download_url"] = href
         if not self.download_url and (
-            "download" in normalized or catalog_label
+            "download" in normalized
+            or catalog_label
+            or legacy_download
         ):
             self.download_url = href
         if catalog_label and not self._list_items:
@@ -355,6 +367,10 @@ class PostDetailsParser(HTMLParser):
         text = " ".join("".join(item["parts"]).split())
         label = extract_catalog_label(text) or extract_trailing_catalog_label(text)
         if not label and self._release_group in {"PDF", "EPUB"}:
+            label = "Complete edition"
+        if not label and item["source_list"]:
+            label = legacy_anchor_label(text)
+        if not label and item["source_list"] == 0:
             label = "Complete edition"
         if not label:
             return
@@ -541,6 +557,30 @@ def is_external_http_url(value: str) -> bool:
         "jnovels.com",
         "www.jnovels.com",
     }
+
+
+def is_legacy_download_url(value: str) -> bool:
+    host = urllib.parse.urlparse(value).netloc.casefold()
+    return (
+        host in {"charexempire.com", "www.charexempire.com", "enagato.com", "www.enagato.com"}
+        or (
+            host in {"mp4directs.com", "www.mp4directs.com"}
+            and "/forums/" in urllib.parse.urlparse(value).path.casefold()
+        )
+    )
+
+
+def legacy_anchor_label(value: str) -> str | None:
+    cleaned = re.sub(
+        r"\b(?:PDF|EPUB|DOWNLOAD|HERE|OPEN|READ)\b",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+    cleaned = " ".join(cleaned.split()).strip(" -–—.:|")
+    if not cleaned or len(cleaned) > 140:
+        return None
+    return normalize_legacy_title_case(cleaned)
 
 
 def looks_like_download_text(value: str) -> bool:
@@ -1081,7 +1121,8 @@ def initialize_db() -> None:
             CREATE TABLE IF NOT EXISTS series_status (
                 series_url TEXT PRIMARY KEY,
                 checked_at TEXT NOT NULL,
-                metadata_checked_at TEXT
+                metadata_checked_at TEXT,
+                unavailable_at TEXT
             );
             """
         )
@@ -1119,6 +1160,10 @@ def initialize_db() -> None:
             connection.execute(
                 "ALTER TABLE series_status ADD COLUMN metadata_checked_at TEXT"
             )
+        if "unavailable_at" not in status_columns:
+            connection.execute(
+                "ALTER TABLE series_status ADD COLUMN unavailable_at TEXT"
+            )
         connection.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_books_original_post_cached
@@ -1140,6 +1185,7 @@ def initialize_db() -> None:
     build_missing_fallback_catalogs()
     prepare_legacy_reparse()
     prune_pdf_duplicates()
+    cleanup_misclassified_series_tracking()
 
 
 def upsert_books(books: list[Book]) -> int:
@@ -1525,7 +1571,9 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
             """
             INSERT INTO series_status (series_url, checked_at)
             VALUES (?, ?)
-            ON CONFLICT(series_url) DO UPDATE SET checked_at = excluded.checked_at
+            ON CONFLICT(series_url) DO UPDATE
+            SET checked_at = excluded.checked_at,
+                unavailable_at = NULL
             """,
             (series_url, now),
         )
@@ -1540,9 +1588,27 @@ def mark_series_metadata_checked(series_url: str, checked_at: str | None = None)
             INSERT INTO series_status (series_url, checked_at, metadata_checked_at)
             VALUES (?, ?, ?)
             ON CONFLICT(series_url) DO UPDATE
-            SET metadata_checked_at = excluded.metadata_checked_at
+            SET metadata_checked_at = excluded.metadata_checked_at,
+                unavailable_at = NULL
             """,
             (series_url, checked_at, checked_at),
+        )
+
+
+def mark_series_unavailable(series_url: str) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO series_status
+                (series_url, checked_at, metadata_checked_at, unavailable_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(series_url) DO UPDATE
+            SET checked_at = excluded.checked_at,
+                metadata_checked_at = excluded.metadata_checked_at,
+                unavailable_at = excluded.unavailable_at
+            """,
+            (series_url, now, now, now),
         )
 
 
@@ -1636,6 +1702,49 @@ def build_missing_fallback_catalogs() -> int:
             """
         ).fetchall()
     return sum(build_fallback_catalog(row["original_post_url"]) for row in rows)
+
+
+def reparent_series_alias(old_series_url: str, new_series_url: str) -> int:
+    with connect_db() as connection:
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE books
+            SET original_post_url = ?
+            WHERE original_post_url = ?
+            """,
+            (new_series_url, old_series_url),
+        )
+        connection.execute(
+            "DELETE FROM series_volumes WHERE series_url = ?",
+            (old_series_url,),
+        )
+        connection.execute(
+            "DELETE FROM series_status WHERE series_url = ?",
+            (old_series_url,),
+        )
+        changes = connection.total_changes - before
+    build_fallback_catalog(new_series_url)
+    invalidate_catalog_indexes()
+    return changes
+
+
+def cleanup_misclassified_series_tracking() -> int:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT ss.series_url, b.original_post_url
+            FROM series_status AS ss
+            JOIN books AS b ON b.url = ss.series_url
+            WHERE b.entry_type = 'volume'
+              AND b.original_post_url IS NOT NULL
+              AND b.original_post_url <> b.url
+            """
+        ).fetchall()
+    return sum(
+        reparent_series_alias(row["series_url"], row["original_post_url"])
+        for row in rows
+    )
 
 
 def reconcile_series_downloads(series_url: str) -> int:
@@ -1786,8 +1895,11 @@ def get_cache_health(
             f"""
             SELECT COUNT(*)
             FROM series_status AS ss
-            WHERE ss.metadata_checked_at IS NULL
-               OR {stale_series_where_clause()}
+            WHERE ss.unavailable_at IS NULL
+              AND (
+                    ss.metadata_checked_at IS NULL
+                    OR {stale_series_where_clause()}
+                  )
             """,
             (series_stale_cutoff(),),
         ).fetchone()[0]
@@ -1814,12 +1926,15 @@ def series_stale_cutoff() -> str:
 def stale_series_where_clause() -> str:
     return """
         (
-            ss.checked_at < ?
-            OR EXISTS (
-                SELECT 1
-                FROM books AS b
-                WHERE b.original_post_url = ss.series_url
-                  AND b.cached_at > ss.checked_at
+            ss.unavailable_at IS NULL
+            AND (
+                ss.checked_at < ?
+                OR EXISTS (
+                    SELECT 1
+                    FROM books AS b
+                    WHERE b.original_post_url = ss.series_url
+                      AND b.cached_at > ss.checked_at
+                )
             )
         )
     """
@@ -1862,7 +1977,7 @@ def get_series_metadata_backfill_urls(
     *,
     exclude_urls: set[str] | None = None,
 ) -> list[str]:
-    conditions = ["metadata_checked_at IS NULL"]
+    conditions = ["metadata_checked_at IS NULL", "unavailable_at IS NULL"]
     params: list[Any] = []
     if exclude_urls:
         placeholders = ", ".join("?" for _ in exclude_urls)
