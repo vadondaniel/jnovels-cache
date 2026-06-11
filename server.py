@@ -706,6 +706,14 @@ def normalize_volume_number(value: str) -> str:
 
 
 def normalize_display_title(value: str) -> str:
+    has_pdf = bool(
+        re.search(r"\[PDF\]", value, re.IGNORECASE)
+        or re.search(r"\sPDF\s*$", value, re.IGNORECASE)
+    )
+    has_epub = bool(
+        re.search(r"\[EPUB\]", value, re.IGNORECASE)
+        or re.search(r"\sEPUB\s*$", value, re.IGNORECASE)
+    )
     cleaned = re.sub(
         r"^(?:\s*\[(?:WEB\s*NOVEL|WEBNOVEL|PDF|EPUB)\]\s*)+",
         "",
@@ -725,7 +733,10 @@ def normalize_display_title(value: str) -> str:
         cleaned,
         flags=re.IGNORECASE,
     )
-    return " ".join(cleaned.split())
+    cleaned = " ".join(cleaned.split())
+    if has_pdf and not has_epub:
+        cleaned = f"{cleaned} PDF"
+    return cleaned
 
 
 def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
@@ -734,16 +745,18 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
     match = re.search(
         r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
         r"(?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
-        r"(?:\s+Light\s+Novel)?$",
+        r"(?:\s+Light\s+Novel)?(?:\s+(PDF))?$",
         cleaned,
         flags=re.IGNORECASE,
     )
     if match:
         series_title = cleaned[: match.start()].rstrip(" .…")
+        if match.group(2):
+            series_title = f"{series_title} PDF"
         return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
 
     slug_match = re.search(
-        r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-epub/?$",
+        r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-(?:epub|pdf)/?$",
         urllib.parse.urlparse(url).path,
         flags=re.IGNORECASE,
     )
@@ -795,6 +808,97 @@ def series_identity_key(title: str | None, url: str) -> str:
         flags=re.IGNORECASE,
     )
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
+
+
+def book_page_format(title: str, url: str) -> str | None:
+    value = f"{title} {urllib.parse.urlparse(url).path}".casefold()
+    has_pdf = bool(
+        "[pdf]" in value
+        or re.search(r"(?:\s|-)pdf(?:/)?$", value)
+        or "pdfepub" in value
+    )
+    has_epub = bool(
+        "[epub]" in value
+        or re.search(r"(?:\s|-)epub(?:/)?$", value)
+        or "pdfepub" in value
+    )
+    if has_pdf and has_epub:
+        return "mixed"
+    if has_pdf:
+        return "pdf"
+    if has_epub:
+        return "epub"
+    return None
+
+
+def book_duplicate_key(title: str, url: str) -> tuple[str, str]:
+    _, volume_label = parse_book_identity(title, url)
+    return series_identity_key(title, url), (volume_label or "").casefold()
+
+
+def delete_book_urls(
+    connection: sqlite3.Connection,
+    urls: set[str],
+) -> int:
+    if not urls:
+        return 0
+    placeholders = ", ".join("?" for _ in urls)
+    params = tuple(sorted(urls))
+    connection.execute(
+        f"DELETE FROM series_volumes WHERE series_url IN ({placeholders})",
+        params,
+    )
+    connection.execute(
+        f"DELETE FROM series_status WHERE series_url IN ({placeholders})",
+        params,
+    )
+    before = connection.total_changes
+    connection.execute(
+        f"DELETE FROM books WHERE url IN ({placeholders})",
+        params,
+    )
+    return connection.total_changes - before
+
+
+def prune_pdf_duplicates(
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    def prune(active_connection: sqlite3.Connection) -> int:
+        rows = active_connection.execute(
+            "SELECT title, url, original_post_url FROM books"
+        ).fetchall()
+        preferred_keys = {
+            book_duplicate_key(row["title"], row["url"])
+            for row in rows
+            if book_page_format(row["title"], row["url"]) in {"epub", "mixed"}
+        }
+        duplicate_urls = {
+            row["url"]
+            for row in rows
+            if book_page_format(row["title"], row["url"]) == "pdf"
+            and book_duplicate_key(row["title"], row["url"]) in preferred_keys
+        }
+        duplicate_series_urls = {
+            row["url"]
+            for row in rows
+            if row["url"] in duplicate_urls and not row["original_post_url"]
+        }
+        duplicate_urls.update(
+            row["url"]
+            for row in rows
+            if row["original_post_url"] in duplicate_series_urls
+            and book_page_format(row["title"], row["url"]) == "pdf"
+        )
+        deleted = delete_book_urls(active_connection, duplicate_urls)
+        if deleted:
+            invalidate_catalog_indexes()
+        return deleted
+
+    if connection is not None:
+        return prune(connection)
+    with connect_db() as active_connection:
+        return prune(active_connection)
 
 
 def invalidate_catalog_indexes() -> None:
@@ -986,11 +1090,31 @@ def initialize_db() -> None:
         )
     build_missing_fallback_catalogs()
     prepare_legacy_reparse()
+    prune_pdf_duplicates()
 
 
 def upsert_books(books: list[Book]) -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect_db() as connection:
+        existing_rows = connection.execute(
+            "SELECT title, url, original_post_url FROM books"
+        ).fetchall()
+        preferred_keys = {
+            book_duplicate_key(row["title"], row["url"])
+            for row in existing_rows
+            if book_page_format(row["title"], row["url"]) in {"epub", "mixed"}
+        }
+        preferred_keys.update(
+            book_duplicate_key(book.title, book.url)
+            for book in books
+            if book_page_format(book.title, book.url) in {"epub", "mixed"}
+        )
+        books = [
+            book
+            for book in books
+            if book_page_format(book.title, book.url) != "pdf"
+            or book_duplicate_key(book.title, book.url) not in preferred_keys
+        ]
         before = connection.total_changes
         connection.executemany(
             """
@@ -1007,6 +1131,7 @@ def upsert_books(books: list[Book]) -> int:
                 for book in books
             ],
         )
+        prune_pdf_duplicates(connection=connection)
         changes = connection.total_changes - before
     if changes:
         invalidate_catalog_indexes()
@@ -1985,6 +2110,10 @@ def run_sync(
 
             def persist_page(page: int, page_books: list[Book]) -> None:
                 upsert_books(page_books)
+                cached_urls = get_cached_urls()
+                page_books[:] = [
+                    book for book in page_books if book.url in cached_urls
+                ]
                 pending = checkpoint["pending_detail_urls"]
                 pending.extend(book.url for book in page_books if book.url not in pending)
                 sync_state["queued_details"] = len(pending)
@@ -2000,7 +2129,12 @@ def run_sync(
                 known_urls,
                 persist_page,
             )
-            detail_urls = list(dict.fromkeys(book.url for book in books))
+            cached_urls = get_cached_urls()
+            detail_urls = list(
+                dict.fromkeys(
+                    book.url for book in books if book.url in cached_urls
+                )
+            )
             detail_urls.extend(
                 get_incomplete_detail_urls(
                     AUTO_REPAIR_LIMIT,

@@ -291,6 +291,54 @@ class ParserTests(unittest.TestCase):
             ("Example Story", "Vol. 3"),
         )
 
+    def test_keeps_format_visible_for_pdf_only_entries(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "Death March to the Parallel World Rhapsody Volume 19 Pdf",
+                "https://jnovels.com/death-march-volume-19-pdf/",
+            ),
+            ("Death March to the Parallel World Rhapsody PDF", "Vol. 19"),
+        )
+        self.assertEqual(
+            server.parse_book_identity(
+                "DOWNLOAD DEATH MARCH ALL VOLUMES PDF",
+                "https://jnovels.com/download-death-march-all-volume-pdf/",
+            ),
+            ("DEATH MARCH PDF", None),
+        )
+
+    def test_does_not_mark_mixed_pdf_epub_entries_as_pdf_only(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "[PDF][EPUB] Example Story",
+                "https://jnovels.com/pdfepub-example-story/",
+            ),
+            ("Example Story", None),
+        )
+
+    def test_identifies_pdf_epub_and_mixed_pages(self):
+        self.assertEqual(
+            server.book_page_format(
+                "Example Volume 1 PDF",
+                "https://jnovels.com/example-volume-1-pdf/",
+            ),
+            "pdf",
+        )
+        self.assertEqual(
+            server.book_page_format(
+                "Example Volume 1 EPUB",
+                "https://jnovels.com/example-volume-1-epub/",
+            ),
+            "epub",
+        )
+        self.assertEqual(
+            server.book_page_format(
+                "[PDF][EPUB] Example",
+                "https://jnovels.com/pdfepub-example/",
+            ),
+            "mixed",
+        )
+
     def test_extracts_search_result_metadata(self):
         parser = server.SearchResultsParser()
         parser.feed(SAMPLE_HTML)
@@ -692,6 +740,106 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(len(books), 1)
         self.assertEqual(books[0]["title"], "New title")
         self.assertEqual(books[0]["image_url"], "https://img/1.jpg")
+
+    def test_keeps_pdf_only_entry_without_epub_counterpart(self):
+        pdf = server.Book(
+            "Example Story Volume 1 PDF",
+            "https://jnovels.com/example-story-volume-1-pdf/",
+            None,
+            None,
+        )
+
+        server.upsert_books([pdf])
+
+        self.assertEqual([book["url"] for book in server.list_books("", "title_asc")], [pdf.url])
+
+    def test_prefers_epub_over_pdf_duplicate_in_same_batch(self):
+        pdf = server.Book(
+            "Example Story Volume 1 PDF",
+            "https://jnovels.com/example-story-volume-1-pdf/",
+            None,
+            None,
+        )
+        epub = server.Book(
+            "Example Story Volume 1 EPUB",
+            "https://jnovels.com/example-story-volume-1-epub/",
+            None,
+            None,
+        )
+
+        server.upsert_books([pdf, epub])
+
+        self.assertEqual(
+            [book["url"] for book in server.list_books("", "title_asc")],
+            [epub.url],
+        )
+
+    def test_later_epub_removes_pdf_series_and_its_pdf_children(self):
+        pdf_series = server.Book(
+            "DOWNLOAD EXAMPLE STORY ALL VOLUMES PDF",
+            "https://jnovels.com/download-example-story-all-volumes-pdf/",
+            None,
+            None,
+        )
+        pdf_child = server.Book(
+            "Example Story Volume 2 PDF",
+            "https://jnovels.com/example-story-volume-2-pdf/",
+            None,
+            None,
+        )
+        epub_series = server.Book(
+            "DOWNLOAD EXAMPLE STORY ALL VOLUMES EPUB",
+            "https://jnovels.com/download-example-story-all-volumes-epub/",
+            None,
+            None,
+        )
+        server.upsert_books([pdf_series, pdf_child])
+        server.update_book_details(
+            pdf_series.url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/pdf-v1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/pdf-v1",
+                        0,
+                    )
+                ],
+            ),
+        )
+        server.update_book_details(
+            pdf_child.url,
+            server.PostDetails(
+                "volume",
+                pdf_series.url,
+                "https://files.example/pdf-v2",
+            ),
+        )
+
+        server.upsert_books([epub_series])
+
+        with server.connect_db() as connection:
+            pdf_books = connection.execute(
+                "SELECT url FROM books WHERE url IN (?, ?)",
+                (pdf_series.url, pdf_child.url),
+            ).fetchall()
+            pdf_catalog = connection.execute(
+                "SELECT 1 FROM series_volumes WHERE series_url = ?",
+                (pdf_series.url,),
+            ).fetchall()
+            pdf_status = connection.execute(
+                "SELECT 1 FROM series_status WHERE series_url = ?",
+                (pdf_series.url,),
+            ).fetchall()
+        self.assertEqual(pdf_books, [])
+        self.assertEqual(pdf_catalog, [])
+        self.assertEqual(pdf_status, [])
+        self.assertEqual(
+            [book["url"] for book in server.list_books("", "title_asc")],
+            [epub_series.url],
+        )
 
     def test_schema_indexes_stale_series_lookup(self):
         with server.connect_db() as connection:
