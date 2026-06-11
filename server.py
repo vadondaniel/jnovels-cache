@@ -35,6 +35,14 @@ SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
 EXCLUDED_SEARCH_PATHS = {"/light-novel-epub-jp/"}
 
+_catalog_index_lock = threading.Lock()
+_catalog_index_cache: tuple[
+    Path,
+    dict[str, tuple[str, int]],
+    dict[str, tuple[str, int]],
+    dict[str, int],
+] | None = None
+
 
 def parse_positive_int(value: str, default: int) -> int:
     try:
@@ -624,62 +632,75 @@ def series_identity_key(title: str | None, url: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
-def get_series_catalog_index() -> dict[str, tuple[str, int]]:
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT sv.series_url,
-                   COUNT(*) AS volume_count,
-                   (
-                       SELECT b.title
-                       FROM books AS b
-                       WHERE b.url = sv.series_url
-                       LIMIT 1
-                   ) AS title
-            FROM series_volumes AS sv
-            GROUP BY sv.series_url
-            """
-        ).fetchall()
+def invalidate_catalog_indexes() -> None:
+    global _catalog_index_cache
+    with _catalog_index_lock:
+        _catalog_index_cache = None
 
-    index: dict[str, tuple[str, int]] = {}
-    for row in rows:
-        key = series_identity_key(row["title"], row["series_url"])
-        candidate = (row["series_url"], row["volume_count"])
-        if key and candidate[1] > index.get(key, ("", 0))[1]:
-            index[key] = candidate
-    return index
+
+def get_catalog_indexes() -> tuple[
+    dict[str, tuple[str, int]],
+    dict[str, tuple[str, int]],
+    dict[str, int],
+]:
+    global _catalog_index_cache
+    with _catalog_index_lock:
+        if _catalog_index_cache is not None and _catalog_index_cache[0] == DB_PATH:
+            return _catalog_index_cache[1:]
+
+        with connect_db() as connection:
+            rows = connection.execute(
+                """
+                SELECT sv.series_url,
+                       sv.download_url,
+                       counts.volume_count,
+                       b.title
+                FROM series_volumes AS sv
+                JOIN (
+                    SELECT series_url, COUNT(*) AS volume_count
+                    FROM series_volumes
+                    GROUP BY series_url
+                ) AS counts ON counts.series_url = sv.series_url
+                LEFT JOIN books AS b ON b.url = sv.series_url
+                ORDER BY counts.volume_count DESC, sv.series_url
+                """
+            ).fetchall()
+
+        catalog_index: dict[str, tuple[str, int]] = {}
+        download_index: dict[str, tuple[str, int]] = {}
+        volume_counts: dict[str, int] = {}
+        for row in rows:
+            candidate = (row["series_url"], row["volume_count"])
+            volume_counts[row["series_url"]] = row["volume_count"]
+            key = series_identity_key(row["title"], row["series_url"])
+            if key and candidate[1] > catalog_index.get(key, ("", 0))[1]:
+                catalog_index[key] = candidate
+            download_index.setdefault(row["download_url"], candidate)
+
+        _catalog_index_cache = (
+            DB_PATH,
+            catalog_index,
+            download_index,
+            volume_counts,
+        )
+        return catalog_index, download_index, volume_counts
+
+
+def get_series_catalog_index() -> dict[str, tuple[str, int]]:
+    catalog_index, _, _ = get_catalog_indexes()
+    return catalog_index
 
 
 def get_download_catalog_index() -> dict[str, tuple[str, int]]:
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT matched.download_url,
-                   matched.series_url,
-                   counts.volume_count
-            FROM series_volumes AS matched
-            JOIN (
-                SELECT series_url, COUNT(*) AS volume_count
-                FROM series_volumes
-                GROUP BY series_url
-            ) AS counts ON counts.series_url = matched.series_url
-            ORDER BY counts.volume_count DESC, matched.series_url
-            """
-        ).fetchall()
-
-    index: dict[str, tuple[str, int]] = {}
-    for row in rows:
-        index.setdefault(
-            row["download_url"],
-            (row["series_url"], row["volume_count"]),
-        )
-    return index
+    _, download_index, _ = get_catalog_indexes()
+    return download_index
 
 
 @contextmanager
 def connect_db() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
+    connection.execute("PRAGMA busy_timeout = 30000")
     try:
         yield connection
         connection.commit()
@@ -691,7 +712,10 @@ def connect_db() -> Iterator[sqlite3.Connection]:
 
 
 def initialize_db() -> None:
+    invalidate_catalog_indexes()
     with connect_db() as connection:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA synchronous = NORMAL")
         connection.executescript(
             """
             CREATE TABLE IF NOT EXISTS books (
@@ -779,6 +803,12 @@ def initialize_db() -> None:
             )
         connection.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_books_original_post_cached
+            ON books(original_post_url, cached_at)
+            """
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO series_status (series_url, checked_at)
             SELECT series_url, MAX(cached_at)
             FROM series_volumes
@@ -811,7 +841,10 @@ def upsert_books(books: list[Book]) -> int:
                 for book in books
             ],
         )
-        return connection.total_changes - before
+        changes = connection.total_changes - before
+    if changes:
+        invalidate_catalog_indexes()
+    return changes
 
 
 def set_metadata(key: str, value: str) -> None:
@@ -830,14 +863,25 @@ def delete_metadata(key: str) -> None:
         connection.execute("DELETE FROM metadata WHERE key = ?", (key,))
 
 
-def get_metadata() -> dict[str, str]:
-    with connect_db() as connection:
-        rows = connection.execute("SELECT key, value FROM metadata").fetchall()
-    return {row["key"]: row["value"] for row in rows}
+def get_metadata(
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, str]:
+    def load(active_connection: sqlite3.Connection) -> dict[str, str]:
+        rows = active_connection.execute("SELECT key, value FROM metadata").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    if connection is not None:
+        return load(connection)
+    with connect_db() as active_connection:
+        return load(active_connection)
 
 
-def get_public_metadata() -> dict[str, str]:
-    metadata = get_metadata()
+def get_public_metadata(
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, str]:
+    metadata = get_metadata(connection=connection)
     metadata.pop(SYNC_CHECKPOINT_KEY, None)
     return metadata
 
@@ -993,6 +1037,7 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
             """,
             (series_url, now),
         )
+    invalidate_catalog_indexes()
 
 
 def mark_series_metadata_checked(series_url: str, checked_at: str | None = None) -> None:
@@ -1079,6 +1124,7 @@ def build_fallback_catalog(series_url: str) -> int:
             """,
             (series_url, now),
         )
+    invalidate_catalog_indexes()
     return len(volumes)
 
 
@@ -1208,9 +1254,12 @@ def get_incomplete_detail_urls(
     return [row["url"] for row in rows]
 
 
-def get_cache_health() -> dict[str, int]:
-    with connect_db() as connection:
-        pending = connection.execute(
+def get_cache_health(
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> dict[str, int]:
+    def load(active_connection: sqlite3.Connection) -> dict[str, int]:
+        pending = active_connection.execute(
             """
             SELECT COUNT(*)
             FROM books AS b
@@ -1219,7 +1268,7 @@ def get_cache_health() -> dict[str, int]:
                OR b.download_url IS NULL
             """
         ).fetchone()[0]
-        paused = connection.execute(
+        paused = active_connection.execute(
             """
             SELECT COUNT(*)
             FROM books AS b
@@ -1232,7 +1281,7 @@ def get_cache_health() -> dict[str, int]:
             """,
             (AUTO_REPAIR_MAX_ATTEMPTS,),
         ).fetchone()[0]
-        failed = connection.execute(
+        failed = active_connection.execute(
             """
             SELECT COUNT(*)
             FROM books
@@ -1240,13 +1289,18 @@ def get_cache_health() -> dict[str, int]:
               AND detail_last_error IS NOT NULL
             """
         ).fetchone()[0]
-        stale_series = count_stale_series(connection=connection)
-    return {
-        "pending_details": pending,
-        "failed_retries": failed,
-        "paused_retries": paused,
-        "stale_series": stale_series,
-    }
+        stale_series = count_stale_series(connection=active_connection)
+        return {
+            "pending_details": pending,
+            "failed_retries": failed,
+            "paused_retries": paused,
+            "stale_series": stale_series,
+        }
+
+    if connection is not None:
+        return load(connection)
+    with connect_db() as active_connection:
+        return load(active_connection)
 
 
 def series_stale_cutoff() -> str:
@@ -1385,6 +1439,74 @@ sync_state: dict[str, Any] = {
 }
 
 
+def set_sync_started(
+    start_page: int,
+    max_pages: int,
+    mode: str,
+) -> None:
+    sync_state.update(
+        {
+            "running": True,
+            "mode": mode,
+            "phase": "search",
+            "page": start_page,
+            "pages_requested": max_pages,
+            "pages_completed": 0,
+            "items_seen": 0,
+            "new_items": 0,
+            "details_completed": 0,
+            "details_total": 0,
+            "detail_errors": 0,
+            "series_completed": 0,
+            "series_total": 0,
+            "series_errors": 0,
+            "error": None,
+            "notice": None,
+            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "finished_at": None,
+        }
+    )
+
+
+def start_sync_thread(
+    start_page: int,
+    max_pages: int,
+    delay: float,
+    mode: str,
+    detail_urls_override: list[str] | None = None,
+    series_urls_override: list[str] | None = None,
+    recovery: bool = False,
+    *,
+    name: str = "jnovels-sync",
+) -> bool:
+    if not sync_lock.acquire(blocking=False):
+        return False
+
+    set_sync_started(start_page, max_pages, mode)
+    thread = threading.Thread(
+        target=run_sync,
+        args=(
+            start_page,
+            max_pages,
+            delay,
+            mode,
+            detail_urls_override,
+            series_urls_override,
+            recovery,
+            True,
+        ),
+        name=name,
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except Exception:
+        sync_state["running"] = False
+        sync_lock.release()
+        raise
+    return True
+
+
 def collect_sync_books(
     mode: str,
     start_page: int,
@@ -1506,33 +1628,13 @@ def run_sync(
     detail_urls_override: list[str] | None = None,
     series_urls_override: list[str] | None = None,
     recovery: bool = False,
+    lock_acquired: bool = False,
 ) -> None:
-    if not sync_lock.acquire(blocking=False):
+    if not lock_acquired and not sync_lock.acquire(blocking=False):
         return
 
     try:
-        sync_state.update(
-            {
-                "running": True,
-                "mode": mode,
-                "phase": "search",
-                "page": start_page,
-                "pages_requested": max_pages,
-                "pages_completed": 0,
-                "items_seen": 0,
-                "new_items": 0,
-                "details_completed": 0,
-                "details_total": 0,
-                "detail_errors": 0,
-                "series_completed": 0,
-                "series_total": 0,
-                "series_errors": 0,
-                "error": None,
-                "notice": None,
-                "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "finished_at": None,
-            }
-        )
+        set_sync_started(start_page, max_pages, mode)
         checkpoint: dict[str, Any] = {
             "version": 1,
             "status": "active",
@@ -1791,12 +1893,7 @@ def list_books(
         rows = connection.execute(sql, params).fetchall()
 
     books = [dict(row) for row in rows]
-    catalog_index = get_series_catalog_index()
-    download_catalog_index = get_download_catalog_index()
-    volume_counts = {
-        series_url: volume_count
-        for series_url, volume_count in catalog_index.values()
-    }
+    catalog_index, download_catalog_index, volume_counts = get_catalog_indexes()
 
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
@@ -1923,12 +2020,14 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/status":
             with connect_db() as connection:
                 count = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+                metadata = get_public_metadata(connection=connection)
+                health = get_cache_health(connection=connection)
             self.send_json(
                 {
                     "sync": dict(sync_state),
                     "count": count,
-                    "metadata": get_public_metadata(),
-                    "health": get_cache_health(),
+                    "metadata": metadata,
+                    "health": health,
                 }
             )
             return
@@ -1960,10 +2059,6 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path not in {"/api/sync", "/api/repair-entry"}:
             self.send_error(HTTPStatus.NOT_FOUND)
             return
-        if sync_state["running"]:
-            self.send_json({"error": "A sync is already running."}, HTTPStatus.CONFLICT)
-            return
-
         try:
             payload = self.read_json()
             if parsed.path == "/api/repair-entry":
@@ -1975,13 +2070,20 @@ class AppHandler(SimpleHTTPRequestHandler):
                         HTTPStatus.NOT_FOUND,
                     )
                     return
-                thread = threading.Thread(
-                    target=run_sync,
-                    args=(1, 1, delay, "repair", [url]),
+                started = start_sync_thread(
+                    1,
+                    1,
+                    delay,
+                    "repair",
+                    [url],
                     name="jnovels-repair-entry",
-                    daemon=True,
                 )
-                thread.start()
+                if not started:
+                    self.send_json(
+                        {"error": "A sync is already running."},
+                        HTTPStatus.CONFLICT,
+                    )
+                    return
                 self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
                 return
 
@@ -2002,13 +2104,12 @@ class AppHandler(SimpleHTTPRequestHandler):
             self.send_json({"error": "Invalid sync options."}, HTTPStatus.BAD_REQUEST)
             return
 
-        thread = threading.Thread(
-            target=run_sync,
-            args=(start_page, max_pages, delay, mode),
-            name="jnovels-sync",
-            daemon=True,
-        )
-        thread.start()
+        if not start_sync_thread(start_page, max_pages, delay, mode):
+            self.send_json(
+                {"error": "A sync is already running."},
+                HTTPStatus.CONFLICT,
+            )
+            return
         self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
 
     def read_json(self) -> dict[str, Any]:
@@ -2019,12 +2120,15 @@ class AppHandler(SimpleHTTPRequestHandler):
 
     def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+            return
 
     def log_message(self, format: str, *args: Any) -> None:
         print(f"[{self.log_date_time_string()}] {format % args}")

@@ -457,6 +457,37 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(books[0]["title"], "New title")
         self.assertEqual(books[0]["image_url"], "https://img/1.jpg")
 
+    def test_schema_indexes_stale_series_lookup(self):
+        with server.connect_db() as connection:
+            indexes = {
+                row["name"]
+                for row in connection.execute("PRAGMA index_list(books)").fetchall()
+            }
+
+        self.assertIn("idx_books_original_post_cached", indexes)
+
+    def test_catalog_index_cache_is_invalidated_after_replacement(self):
+        series_url = "https://jnovels.com/example-light-novel-epub/"
+        server.upsert_books(
+            [server.Book("Example Light Novel Epub", series_url, None, None)]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        self.assertEqual(server.list_books("", "title_asc")[0]["volume_count"], 1)
+
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+            ],
+        )
+
+        self.assertEqual(server.list_books("", "title_asc")[0]["volume_count"], 2)
+
     def test_title_search_escapes_sql_wildcards(self):
         server.upsert_books(
             [
@@ -977,6 +1008,20 @@ class SyncTests(unittest.TestCase):
     def tearDown(self):
         self.db_patch.stop()
         self.temp_dir.cleanup()
+
+    def test_start_sync_thread_marks_sync_running_before_worker_starts(self):
+        with patch.object(server.threading, "Thread") as thread_class:
+            started = server.start_sync_thread(4, 6, 0.5, "manual")
+
+        try:
+            self.assertTrue(started)
+            self.assertTrue(server.sync_state["running"])
+            self.assertEqual(server.sync_state["page"], 4)
+            self.assertEqual(server.sync_state["pages_requested"], 6)
+            thread_class.return_value.start.assert_called_once_with()
+        finally:
+            server.sync_state["running"] = False
+            server.sync_lock.release()
 
     def test_new_volume_refreshes_original_series_catalog(self):
         volume_url = "https://jnovels.com/example-volume-3-epub/"
