@@ -736,6 +736,21 @@ elements.syncForm.addEventListener("submit", async (event) => {
   }
 });
 
+async function startPageLoadCatchup() {
+  const payload = await request("/api/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      automatic: true,
+      mode: "catchup",
+      start_page: 1,
+      max_pages: 20,
+      delay: 1,
+    }),
+  });
+  if (payload.started) await loadStatus();
+}
+
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
   state.page = 1;
@@ -803,4 +818,7 @@ window.addEventListener("popstate", () => {
 applyViewFromUrl();
 updateSyncMode();
 Promise.all([loadBooks({ historyMode: "replace" }), loadStatus()])
+  .then(() => startPageLoadCatchup().catch((error) => {
+    console.warn("Automatic catch-up sync could not start:", error);
+  }))
   .catch((error) => showToast(error.message, true));

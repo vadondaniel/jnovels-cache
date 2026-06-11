@@ -1025,6 +1025,36 @@ class SyncTests(unittest.TestCase):
             server.sync_state["running"] = False
             server.sync_lock.release()
 
+    def test_auto_catchup_is_limited_to_once_per_ten_minutes(self):
+        with (
+            patch.object(server, "last_auto_sync_started", None),
+            patch.object(server.time, "monotonic", side_effect=[100.0, 200.0]),
+            patch.object(server, "start_sync_thread", return_value=True) as start_sync,
+        ):
+            first = server.start_auto_catchup(20, 1.0)
+            second = server.start_auto_catchup(20, 1.0)
+
+        self.assertEqual(first, (True, None, 0))
+        self.assertEqual(second, (False, "rate_limited", 500))
+        start_sync.assert_called_once_with(1, 20, 1.0, "catchup")
+
+    def test_busy_auto_catchup_does_not_consume_the_cooldown(self):
+        with (
+            patch.object(server, "last_auto_sync_started", None),
+            patch.object(server.time, "monotonic", side_effect=[100.0, 100.0]),
+            patch.object(
+                server,
+                "start_sync_thread",
+                side_effect=[False, True],
+            ) as start_sync,
+        ):
+            busy = server.start_auto_catchup()
+            started = server.start_auto_catchup()
+
+        self.assertEqual(busy, (False, "sync_running", 0))
+        self.assertEqual(started, (True, None, 0))
+        self.assertEqual(start_sync.call_count, 2)
+
     def test_new_volume_refreshes_original_series_catalog(self):
         volume_url = "https://jnovels.com/example-volume-3-epub/"
         series_url = "https://jnovels.com/example-light-novel-epub/"

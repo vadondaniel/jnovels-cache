@@ -31,6 +31,7 @@ MAX_PAGE_SIZE = 100
 AUTO_REPAIR_LIMIT = 20
 AUTO_REPAIR_MAX_ATTEMPTS = 3
 AUTO_SERIES_REFRESH_LIMIT = 5
+AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
 SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
 EXCLUDED_SEARCH_PATHS = {"/light-novel-epub-jp/"}
@@ -1417,6 +1418,8 @@ def is_cached_book_url(url: str) -> bool:
 
 
 sync_lock = threading.Lock()
+auto_sync_lock = threading.Lock()
+last_auto_sync_started: float | None = None
 sync_state: dict[str, Any] = {
     "running": False,
     "mode": None,
@@ -1515,6 +1518,26 @@ def start_sync_thread(
         sync_lock.release()
         raise
     return True
+
+
+def start_auto_catchup(
+    max_pages: int = 20,
+    delay: float = 1.0,
+) -> tuple[bool, str | None, int]:
+    global last_auto_sync_started
+    with auto_sync_lock:
+        now = time.monotonic()
+        if last_auto_sync_started is not None:
+            elapsed = now - last_auto_sync_started
+            if elapsed < AUTO_SYNC_COOLDOWN_SECONDS:
+                retry_after = max(int(AUTO_SYNC_COOLDOWN_SECONDS - elapsed + 0.999), 1)
+                return False, "rate_limited", retry_after
+
+        if not start_sync_thread(1, max_pages, delay, "catchup"):
+            return False, "sync_running", 0
+
+        last_auto_sync_started = now
+        return True, None, 0
 
 
 def collect_sync_books(
@@ -2131,8 +2154,28 @@ class AppHandler(SimpleHTTPRequestHandler):
             max_limit = 2000 if mode in {"repair", "series_refresh"} else 200
             max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
             delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
+            automatic = payload.get("automatic") is True
         except (ValueError, TypeError, json.JSONDecodeError):
             self.send_json({"error": "Invalid sync options."}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if automatic:
+            if mode != "catchup":
+                self.send_json(
+                    {"error": "Automatic sync only supports catch-up mode."},
+                    HTTPStatus.BAD_REQUEST,
+                )
+                return
+            started, reason, retry_after = start_auto_catchup(max_pages, delay)
+            self.send_json(
+                {
+                    "ok": True,
+                    "started": started,
+                    "reason": reason,
+                    "retry_after": retry_after,
+                },
+                HTTPStatus.ACCEPTED,
+            )
             return
 
         if not start_sync_thread(start_page, max_pages, delay, mode):
