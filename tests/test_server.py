@@ -1018,6 +1018,8 @@ class SyncTests(unittest.TestCase):
             self.assertTrue(server.sync_state["running"])
             self.assertEqual(server.sync_state["page"], 4)
             self.assertEqual(server.sync_state["pages_requested"], 6)
+            self.assertEqual(server.sync_state["request_delay"], 0.5)
+            self.assertIsNotNone(server.sync_state["phase_started_at"])
             thread_class.return_value.start.assert_called_once_with()
         finally:
             server.sync_state["running"] = False

@@ -1432,6 +1432,10 @@ sync_state: dict[str, Any] = {
     "series_completed": 0,
     "series_total": 0,
     "series_errors": 0,
+    "queued_details": 0,
+    "queued_series": 0,
+    "request_delay": None,
+    "phase_started_at": None,
     "error": None,
     "notice": None,
     "started_at": None,
@@ -1442,8 +1446,10 @@ sync_state: dict[str, Any] = {
 def set_sync_started(
     start_page: int,
     max_pages: int,
+    delay: float,
     mode: str,
 ) -> None:
+    started_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     sync_state.update(
         {
             "running": True,
@@ -1460,9 +1466,13 @@ def set_sync_started(
             "series_completed": 0,
             "series_total": 0,
             "series_errors": 0,
+            "queued_details": 0,
+            "queued_series": 0,
+            "request_delay": delay,
+            "phase_started_at": started_at,
             "error": None,
             "notice": None,
-            "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "started_at": started_at,
             "finished_at": None,
         }
     )
@@ -1482,7 +1492,7 @@ def start_sync_thread(
     if not sync_lock.acquire(blocking=False):
         return False
 
-    set_sync_started(start_page, max_pages, mode)
+    set_sync_started(start_page, max_pages, delay, mode)
     thread = threading.Thread(
         target=run_sync,
         args=(
@@ -1634,7 +1644,7 @@ def run_sync(
         return
 
     try:
-        set_sync_started(start_page, max_pages, mode)
+        set_sync_started(start_page, max_pages, delay, mode)
         checkpoint: dict[str, Any] = {
             "version": 1,
             "status": "active",
@@ -1670,6 +1680,7 @@ def run_sync(
                 upsert_books(page_books)
                 pending = checkpoint["pending_detail_urls"]
                 pending.extend(book.url for book in page_books if book.url not in pending)
+                sync_state["queued_details"] = len(pending)
                 checkpoint["page"] = page
                 checkpoint["pages_completed"] = sync_state["pages_completed"]
                 save_sync_checkpoint(checkpoint)
@@ -1692,12 +1703,18 @@ def run_sync(
             )
             scheduled_series_urls.update(get_series_refresh_urls(AUTO_SERIES_REFRESH_LIMIT))
         sync_state["phase"] = "details"
+        sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         sync_state["details_total"] = len(detail_urls)
+        sync_state["queued_details"] = len(detail_urls)
+        sync_state["queued_series"] = len(scheduled_series_urls)
         checkpoint["phase"] = "details"
         checkpoint["pending_detail_urls"] = list(dict.fromkeys(detail_urls))
         checkpoint["pending_series_urls"] = sorted(scheduled_series_urls)
         save_sync_checkpoint(checkpoint)
         discovered_series_urls: set[str] = set()
+        detail_url_set = set(detail_urls)
         for index, url in enumerate(detail_urls):
             time.sleep(delay)
             completed = False
@@ -1717,6 +1734,11 @@ def run_sync(
             finally:
                 if completed:
                     sync_state["details_completed"] += 1
+                    sync_state["queued_details"] = len(detail_urls) - index - 1
+                    sync_state["queued_series"] = len(
+                        (scheduled_series_urls | discovered_series_urls)
+                        - detail_url_set
+                    )
                     checkpoint["pending_detail_urls"] = detail_urls[index + 1 :]
                     checkpoint["pending_series_urls"] = sorted(
                         scheduled_series_urls | discovered_series_urls
@@ -1724,10 +1746,14 @@ def run_sync(
                     save_sync_checkpoint(checkpoint)
 
         missing_series_urls = sorted(
-            (discovered_series_urls | scheduled_series_urls) - set(detail_urls)
+            (discovered_series_urls | scheduled_series_urls) - detail_url_set
         )
         sync_state["phase"] = "series"
+        sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
         sync_state["series_total"] = len(missing_series_urls)
+        sync_state["queued_series"] = len(missing_series_urls)
         checkpoint["phase"] = "series"
         checkpoint["pending_detail_urls"] = []
         checkpoint["pending_series_urls"] = missing_series_urls
@@ -1747,12 +1773,16 @@ def run_sync(
             finally:
                 if completed:
                     sync_state["series_completed"] += 1
+                    sync_state["queued_series"] = len(missing_series_urls) - index - 1
                     checkpoint["pending_series_urls"] = missing_series_urls[index + 1 :]
                     save_sync_checkpoint(checkpoint)
 
         finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["finished_at"] = finished
         sync_state["phase"] = None
+        sync_state["phase_started_at"] = None
+        sync_state["queued_details"] = 0
+        sync_state["queued_series"] = 0
         if recovery:
             sync_state["notice"] = (
                 "Recovered saved work from an interrupted sync; "
@@ -1770,6 +1800,7 @@ def run_sync(
         sync_state["error"] = str(exc)
         sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         sync_state["phase"] = None
+        sync_state["phase_started_at"] = None
     finally:
         sync_state["running"] = False
         sync_lock.release()

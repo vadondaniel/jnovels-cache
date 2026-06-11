@@ -25,6 +25,8 @@ const elements = {
   filterButtons: [...document.querySelectorAll("[data-filter]")],
   cacheHealth: document.querySelector("#cache-health"),
   syncStatus: document.querySelector("#sync-status"),
+  syncStatusLabel: document.querySelector("#sync-status-label"),
+  syncStatusDetail: document.querySelector("#sync-status-detail"),
   syncToggle: document.querySelector("#sync-toggle"),
   syncDialog: document.querySelector("#sync-dialog"),
   syncClose: document.querySelector("#sync-close"),
@@ -427,6 +429,58 @@ async function loadBooks({ scroll = false, historyMode = null } = {}) {
   if (scroll) elements.grid.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+function formatRemainingTime(seconds) {
+  const rounded = Math.max(Math.ceil(seconds), 1);
+  if (rounded < 60) return `${rounded} sec`;
+  const minutes = Math.ceil(rounded / 60);
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes ? `${hours} hr ${remainingMinutes} min` : `${hours} hr`;
+}
+
+function estimateSyncTime(sync) {
+  const phaseStarted = Date.parse(sync.phase_started_at || "");
+  const elapsed = Number.isFinite(phaseStarted)
+    ? Math.max((Date.now() - phaseStarted) / 1000, 0)
+    : 0;
+  const delay = Math.max(Number(sync.request_delay) || 0, 0.5);
+  const fallbackSeconds = delay + 1;
+
+  if (sync.phase === "details") {
+    const completed = sync.details_completed || 0;
+    const secondsPerItem = completed ? Math.max(elapsed / completed, delay) : fallbackSeconds;
+    const remaining = (sync.queued_details || 0) + (sync.queued_series || 0);
+    return remaining
+      ? `Estimated remaining: ${formatRemainingTime(remaining * secondsPerItem)}`
+      : "";
+  }
+
+  if (sync.phase === "series") {
+    const completed = sync.series_completed || 0;
+    const secondsPerSeries = completed ? Math.max(elapsed / completed, delay) : fallbackSeconds;
+    const remaining = sync.queued_series || 0;
+    return remaining
+      ? `Estimated remaining: ${formatRemainingTime(remaining * secondsPerSeries)}`
+      : "";
+  }
+
+  const completedPages = sync.pages_completed || 0;
+  const remainingPages = Math.max(
+    (sync.pages_requested || 0) - completedPages,
+    0,
+  );
+  const secondsPerPage = completedPages
+    ? Math.max(elapsed / completedPages, delay)
+    : fallbackSeconds;
+  const queuedChecks = sync.queued_details || 0;
+  const remainingSeconds =
+    remainingPages * secondsPerPage + queuedChecks * fallbackSeconds;
+  return remainingSeconds
+    ? `Estimated remaining: up to ${formatRemainingTime(remainingSeconds)}`
+    : "";
+}
+
 function updateStatus(payload) {
   const sync = payload.sync;
   const health = payload.health || {};
@@ -451,29 +505,48 @@ function updateStatus(payload) {
     : "Open repair options";
 
   if (sync.running) {
+    const detailLines = [];
+    const queuedDetails = sync.queued_details || 0;
+    const queuedSeries = sync.queued_series || 0;
     if (sync.phase === "series") {
-      elements.syncStatus.textContent =
+      elements.syncStatusLabel.textContent =
         `Updating series ${Math.min(sync.series_completed + 1, sync.series_total)} of ${sync.series_total}`;
+      detailLines.push(`${queuedSeries} series remaining`);
     } else if (sync.phase === "details") {
-      elements.syncStatus.textContent =
+      elements.syncStatusLabel.textContent =
         `Checking entry ${Math.min(sync.details_completed + 1, sync.details_total)} of ${sync.details_total}`;
+      detailLines.push(`${queuedDetails} entries remaining`);
+      if (queuedSeries) detailLines.push(`${queuedSeries} series queued next`);
     } else {
       const prefix = sync.mode === "extend"
         ? "Finding older uncached entries"
         : sync.mode === "catchup"
           ? "Checking newest entries"
           : "Scanning";
-      elements.syncStatus.textContent =
+      elements.syncStatusLabel.textContent =
         `${prefix} · page ${sync.page} · ${sync.new_items} new`;
+      const remainingPages = Math.max(
+        (sync.pages_requested || 0) - (sync.pages_completed || 0),
+        0,
+      );
+      detailLines.push(`${sync.pages_completed || 0} pages checked`);
+      if (remainingPages) detailLines.push(`Up to ${remainingPages} pages remaining`);
+      if (queuedDetails) detailLines.push(`${queuedDetails} entries queued next`);
     }
+    const eta = estimateSyncTime(sync);
+    if (eta) detailLines.push(eta);
+    elements.syncStatusDetail.textContent = detailLines.join("\n");
+    elements.syncStatus.tabIndex = 0;
     elements.syncStatus.classList.add("is-running");
   } else {
     elements.syncStatus.classList.remove("is-running");
-    elements.syncStatus.textContent = sync.error
+    elements.syncStatusLabel.textContent = sync.error
       ? `Last sync failed: ${sync.error}`
       : lastSync
         ? `${payload.count} cached ${payload.count === 1 ? "entry" : "entries"}`
         : "";
+    elements.syncStatusDetail.textContent = "";
+    elements.syncStatus.removeAttribute("tabindex");
   }
 }
 
