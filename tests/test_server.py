@@ -268,6 +268,16 @@ class ParserTests(unittest.TestCase):
             ("Overlord", "Vol. 14"),
         )
 
+    def test_separates_volume_subtitle_from_series_identity(self):
+        self.assertEqual(
+            server.parse_book_identity(
+                "How a Realist Hero Rebuilt the Kingdom Volume 21: "
+                "Short Story Chronicles Epub",
+                "https://jnovels.com/how-a-realist-hero-volume-21-epub/",
+            ),
+            ("How a Realist Hero Rebuilt the Kingdom", "Vol. 21"),
+        )
+
     def test_removes_legacy_format_tags_from_display_identity(self):
         self.assertEqual(
             server.parse_book_identity(

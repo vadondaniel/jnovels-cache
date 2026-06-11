@@ -834,6 +834,7 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
     match = re.search(
         r"\s+Volume\s+([0-9]+(?:\.[0-9]+)?)"
         r"(?:\s+(?:Canto\s+[IVX]+|Part\s+[0-9]+|Act\s+[0-9]+|[IVX]+|Exordium|Finale))?"
+        r"(?:\s*[:\-–—]\s+.+?)?"
         r"(?:\s+Light\s+Novel)?(?:\s+(PDF))?$",
         cleaned,
         flags=re.IGNORECASE,
