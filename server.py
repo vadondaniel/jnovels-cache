@@ -330,6 +330,12 @@ class PostDetailsParser(HTMLParser):
             self._genres.append(genre)
             return
 
+        if parsed_href.netloc.casefold() in {
+            "play.google.com",
+            "apps.apple.com",
+        }:
+            return
+
         if (
             self._list_items
             and parsed_href.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
@@ -1524,6 +1530,7 @@ def infer_series_parent(
     url: str,
     parent_hints: list[str] | None = None,
     download_url: str | None = None,
+    volume_label_hint: str | None = None,
 ) -> str | None:
     with connect_db() as connection:
         if download_url:
@@ -1552,6 +1559,7 @@ def infer_series_parent(
         if not book:
             return None
         _, volume_label = parse_book_identity(book["title"], url)
+        volume_label = volume_label or volume_label_hint
         if not volume_label:
             return None
         catalog_volume_label = re.sub(
@@ -1567,26 +1575,49 @@ def infer_series_parent(
         )
         candidates = connection.execute(
             """
-            SELECT b.title,
-                   b.url,
+            WITH candidate_urls AS (
+                SELECT url
+                FROM books
+                WHERE entry_type = 'series'
+                UNION
+                SELECT original_post_url
+                FROM books
+                WHERE original_post_url IS NOT NULL
+            )
+            SELECT COALESCE(
+                       (
+                           SELECT parent.title
+                           FROM books AS parent
+                           WHERE parent.url = candidate_urls.url
+                       ),
+                       (
+                           SELECT child.title
+                           FROM books AS child
+                           WHERE child.original_post_url = candidate_urls.url
+                           ORDER BY child.published_at IS NULL,
+                                    child.published_at DESC,
+                                    child.id DESC
+                           LIMIT 1
+                       )
+                   ) AS title,
+                   candidate_urls.url,
                    (
-                       SELECT COUNT(*)
-                       FROM series_volumes AS count_volume
-                       WHERE count_volume.series_url = b.url
+                        SELECT COUNT(*)
+                        FROM series_volumes AS count_volume
+                        WHERE count_volume.series_url = candidate_urls.url
                    ) AS volume_count,
                    EXISTS (
-                       SELECT 1
-                       FROM series_volumes AS matching_volume
-                       WHERE matching_volume.series_url = b.url
-                         AND lower(matching_volume.label) = lower(?)
+                        SELECT 1
+                        FROM series_volumes AS matching_volume
+                        WHERE matching_volume.series_url = candidate_urls.url
+                          AND lower(matching_volume.label) = lower(?)
                    ) AS has_matching_volume
-            FROM books AS b
-            WHERE b.entry_type = 'series'
-              AND b.url <> ?
+            FROM candidate_urls
+            WHERE candidate_urls.url <> ?
               AND EXISTS (
-                  SELECT 1
-                  FROM series_volumes AS sv
-                  WHERE sv.series_url = b.url
+                   SELECT 1
+                   FROM series_volumes AS sv
+                   WHERE sv.series_url = candidate_urls.url
               )
             """,
             (catalog_volume_label, url),
@@ -1596,11 +1627,16 @@ def infer_series_parent(
     for candidate in candidates:
         candidate_key = series_identity_key(candidate["title"], candidate["url"])
         candidate_words = candidate_key.split()
+        candidate_compact = candidate_key.replace(" ", "")
         title_prefix_matches = any(
             child_key.startswith(f"{candidate_key} ")
             for child_key in child_keys
         )
-        if title_prefix_matches and (
+        alias_matches = len(candidate_compact) >= 10 and any(
+            candidate_compact in child_key.replace(" ", "")
+            for child_key in child_keys[1:]
+        )
+        if (title_prefix_matches or alias_matches) and (
             len(candidate_words) >= 5
             or (
                 len(candidate_words) >= 2
@@ -1613,16 +1649,30 @@ def infer_series_parent(
 
 
 def update_book_details(url: str, details: PostDetails) -> None:
+    inferred_parent: str | None = None
+    orphaned_parent: str | None = None
     if details.entry_type == "series" and not details.original_post_url:
+        volume_label_hint = next(
+            (
+                volume.label
+                for volume in details.volumes
+                if re.match(r"^Volume\s+[0-9]", volume.label, re.IGNORECASE)
+            ),
+            None,
+        )
         inferred_parent = infer_series_parent(
             url,
-            details.parent_hints,
+            [*details.parent_hints, *details.associated_names],
             details.download_url,
+            volume_label_hint,
         )
         if inferred_parent:
-            details.entry_type = "volume"
-            details.original_post_url = inferred_parent
-            details.volumes = []
+            if is_cached_book_url(inferred_parent):
+                details.entry_type = "volume"
+                details.original_post_url = inferred_parent
+                details.volumes = []
+            else:
+                orphaned_parent = inferred_parent
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     associated_names = encode_string_list(details.associated_names)
@@ -1666,8 +1716,19 @@ def update_book_details(url: str, details: PostDetails) -> None:
                 """,
                 (associated_names, genres, details.synopsis, url),
             )
-    if details.entry_type == "series":
-        replace_series_volumes(url, details.volumes)
+    if orphaned_parent:
+        merge_orphaned_catalog(
+            orphaned_parent,
+            url,
+            details.volumes,
+        )
+    elif inferred_parent:
+        reparent_series_alias(url, inferred_parent)
+    elif details.entry_type == "series":
+        replace_series_volumes(
+            url,
+            preserve_grouped_catalog(url, details.volumes),
+        )
         build_fallback_catalog(url)
         mark_series_metadata_checked(url, now)
         reconcile_series_downloads(url)
@@ -1718,6 +1779,126 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
     invalidate_catalog_indexes()
 
 
+def preserve_grouped_catalog(
+    series_url: str,
+    refreshed_volumes: list[SeriesVolume],
+) -> list[SeriesVolume]:
+    if not refreshed_volumes or any(
+        volume.release_group for volume in refreshed_volumes
+    ):
+        return refreshed_volumes
+
+    with connect_db() as connection:
+        existing_rows = connection.execute(
+            """
+            SELECT label, download_url, release_group
+            FROM series_volumes
+            WHERE series_url = ?
+              AND release_group IS NOT NULL
+            ORDER BY position
+            """,
+            (series_url,),
+        ).fetchall()
+    groups_by_download = {
+        row["download_url"]: row["release_group"] for row in existing_rows
+    }
+    refreshed_group = next(
+        (
+            groups_by_download.get(volume.download_url)
+            for volume in refreshed_volumes
+            if groups_by_download.get(volume.download_url)
+        ),
+        None,
+    )
+    if not refreshed_group:
+        return refreshed_volumes
+
+    preserved = [
+        SeriesVolume(
+            row["label"],
+            row["download_url"],
+            index,
+            row["release_group"],
+        )
+        for index, row in enumerate(existing_rows)
+        if row["release_group"] != refreshed_group
+    ]
+    preserved_downloads = {volume.download_url for volume in preserved}
+    grouped_refresh = [
+        SeriesVolume(
+            volume.label,
+            volume.download_url,
+            len(preserved) + index,
+            refreshed_group,
+        )
+        for index, volume in enumerate(refreshed_volumes)
+        if volume.download_url not in preserved_downloads
+    ]
+    return preserved + grouped_refresh
+
+
+def merge_orphaned_catalog(
+    orphaned_series_url: str,
+    canonical_series_url: str,
+    canonical_volumes: list[SeriesVolume],
+) -> int:
+    with connect_db() as connection:
+        orphaned_rows = connection.execute(
+            """
+            SELECT label, download_url, position, release_group
+            FROM series_volumes
+            WHERE series_url = ?
+            ORDER BY position
+            """,
+            (orphaned_series_url,),
+        ).fetchall()
+
+    official = [
+        SeriesVolume(
+            row["label"],
+            row["download_url"],
+            index,
+            row["release_group"] or "Official translation",
+        )
+        for index, row in enumerate(orphaned_rows)
+    ]
+    fan = [
+        SeriesVolume(
+            volume.label,
+            volume.download_url,
+            len(official) + index,
+            volume.release_group or "Fan translation",
+        )
+        for index, volume in enumerate(canonical_volumes)
+        if re.match(r"^Volume\s+[0-9]", volume.label, re.IGNORECASE)
+    ]
+    merged = official + fan
+    if not merged:
+        return 0
+
+    with connect_db() as connection:
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE books
+            SET original_post_url = ?
+            WHERE original_post_url = ?
+            """,
+            (canonical_series_url, orphaned_series_url),
+        )
+        connection.execute(
+            "DELETE FROM series_volumes WHERE series_url = ?",
+            (orphaned_series_url,),
+        )
+        connection.execute(
+            "DELETE FROM series_status WHERE series_url = ?",
+            (orphaned_series_url,),
+        )
+        changes = connection.total_changes - before
+    replace_series_volumes(canonical_series_url, merged)
+    return changes + len(merged)
+
+
 def mark_series_metadata_checked(series_url: str, checked_at: str | None = None) -> None:
     checked_at = checked_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect_db() as connection:
@@ -1754,7 +1935,7 @@ def build_fallback_catalog(series_url: str) -> int:
     with connect_db() as connection:
         existing_rows = connection.execute(
             """
-            SELECT label, download_url, position
+            SELECT label, download_url, position, release_group
             FROM series_volumes
             WHERE series_url = ?
             ORDER BY position
@@ -1772,23 +1953,68 @@ def build_fallback_catalog(series_url: str) -> int:
             (series_url,),
         ).fetchall()
 
-    existing_labels = {row["label"].casefold() for row in existing_rows}
+    child_releases = [
+        (
+            extract_catalog_label(row["title"]),
+            row["download_url"],
+        )
+        for row in rows
+    ]
+    duplicate_label_categories = any(
+        label
+        and any(
+            existing["label"].casefold() == label.casefold()
+            and existing["download_url"] != download_url
+            for existing in existing_rows
+        )
+        for label, download_url in child_releases
+    )
+    if duplicate_label_categories:
+        with connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE series_volumes
+                SET release_group = 'Fan translation'
+                WHERE series_url = ?
+                  AND release_group IS NULL
+                """,
+                (series_url,),
+            )
+
+    existing_labels = {
+        (
+            row["label"].casefold(),
+            (
+                row["release_group"]
+                or ("Fan translation" if duplicate_label_categories else "")
+            ).casefold(),
+        )
+        for row in existing_rows
+    }
     existing_downloads = {row["download_url"] for row in existing_rows}
     next_position = max((row["position"] for row in existing_rows), default=-1) + 1
     volumes: list[SeriesVolume] = []
-    for row in rows:
-        label = extract_catalog_label(row["title"])
-        download_url = row["download_url"]
+    for label, download_url in child_releases:
+        release_group = "Official translation" if duplicate_label_categories else None
+        label_key = (
+            (label or "").casefold(),
+            (release_group or "").casefold(),
+        )
         if (
             not label
-            or label.casefold() in existing_labels
+            or label_key in existing_labels
             or download_url in existing_downloads
         ):
             continue
-        existing_labels.add(label.casefold())
+        existing_labels.add(label_key)
         existing_downloads.add(download_url)
         volumes.append(
-            SeriesVolume(label, download_url, next_position + len(volumes))
+            SeriesVolume(
+                label,
+                download_url,
+                next_position + len(volumes),
+                release_group,
+            )
         )
     if not volumes:
         return 0
@@ -1807,7 +2033,7 @@ def build_fallback_catalog(series_url: str) -> int:
                     volume.download_url,
                     volume.position,
                     now,
-                    None,
+                    volume.release_group,
                 )
                 for volume in volumes
             ],

@@ -1652,6 +1652,151 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["entry_type"], "volume")
         self.assertEqual(saved["original_post_url"], series_url)
 
+    def test_infers_orphaned_parent_catalog_from_associated_name_alias(self):
+        legacy_url = "https://jnovels.com/download-eiyuu-kyoushitsu-epub/"
+        parent_url = "https://jnovels.com/classroom-for-heroes-light-novel-epub/"
+        latest_url = "https://jnovels.com/classroom-for-heroes-volume-6-epub/"
+        server.upsert_books(
+            [
+                server.Book(
+                    "Download Eiyuu Kyoushitsu EPUB",
+                    legacy_url,
+                    None,
+                    "2019-04-13",
+                ),
+                server.Book(
+                    "Classroom for Heroes Volume 6 Epub",
+                    latest_url,
+                    None,
+                    "2026-04-16",
+                ),
+            ]
+        )
+        server.update_book_details(
+            latest_url,
+            server.PostDetails(
+                "volume",
+                parent_url,
+                "https://files.example/official-6",
+            ),
+        )
+        server.replace_series_volumes(
+            parent_url,
+            [
+                server.SeriesVolume(
+                    f"Volume {number}",
+                    f"https://files.example/official-{number}",
+                    number - 1,
+                )
+                for number in range(1, 7)
+            ],
+        )
+        server.replace_series_volumes(
+            legacy_url,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/legacy-1",
+                    0,
+                )
+            ],
+        )
+
+        server.update_book_details(
+            legacy_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/legacy-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/legacy-1",
+                        0,
+                    )
+                ],
+                associated_names=[
+                    "Class Room For Heroes Hero Classroom 英雄教室"
+                ],
+            ),
+        )
+        server.update_book_details(
+            legacy_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/legacy-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/legacy-1",
+                        0,
+                    )
+                ],
+                associated_names=[
+                    "Class Room For Heroes Hero Classroom 英雄教室"
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }[legacy_url]
+        self.assertEqual(saved["entry_type"], "series")
+        self.assertIsNone(saved["original_post_url"])
+        self.assertEqual(saved["series_url"], legacy_url)
+        self.assertEqual(saved["volume_count"], 7)
+        self.assertEqual(saved["catalog_count"], 1)
+        volumes = server.list_series_volumes(legacy_url)
+        self.assertEqual(
+            [
+                (volume["release_group"], volume["label"])
+                for volume in volumes
+            ],
+            [
+                *[
+                    ("Official translation", f"Volume {number}")
+                    for number in range(1, 7)
+                ],
+                ("Fan translation", "Volume 1"),
+            ],
+        )
+        with server.connect_db() as connection:
+            obsolete_count = connection.execute(
+                "SELECT COUNT(*) FROM series_volumes WHERE series_url = ?",
+                (parent_url,),
+            ).fetchone()[0]
+            reparented = connection.execute(
+                "SELECT original_post_url FROM books WHERE url = ?",
+                (latest_url,),
+            ).fetchone()[0]
+        self.assertEqual(obsolete_count, 0)
+        self.assertEqual(reparented, legacy_url)
+
+    def test_ignores_app_store_links_in_legacy_catalog(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <ul>
+                <li><a href="https://play.google.com/store/apps/details?id=example">
+                  Download reader app
+                </a></li>
+                <li><a href="https://enagato.com/fan-volume-1">
+                  Volume 1 EPUB
+                </a></li>
+              </ul>
+            </div>
+            """
+        )
+
+        details = parser.details()
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in details.volumes],
+            [("Volume 1", "https://enagato.com/fan-volume-1")],
+        )
+
     def test_parent_refresh_merges_cached_child_missing_from_source_catalog(self):
         series_url = "https://jnovels.com/example-all-volumes-epub/"
         child_url = "https://jnovels.com/example-volume-3-epub/"
