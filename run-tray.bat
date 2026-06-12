@@ -1,3 +1,3 @@
 @echo off
-cd /d "%~dp0"
-powershell.exe -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0tray.ps1"
+start "" wscript.exe //B "%~dp0launch-hidden.vbs" --sta "%~dp0tray.ps1"
+exit /b
