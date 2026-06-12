@@ -1181,6 +1181,51 @@ def series_keys_are_related(first: str, second: str) -> bool:
     return len(shorter.split()) >= 2 and longer.startswith(f"{shorter} ")
 
 
+def is_numbered_subseries_title(parent_title: str, candidate_title: str) -> bool:
+    parent_key = " ".join(re.findall(r"[a-z0-9]+", parent_title.casefold()))
+    candidate_key = " ".join(re.findall(r"[a-z0-9]+", candidate_title.casefold()))
+    if not parent_key or not candidate_key.startswith(f"{parent_key} "):
+        return False
+    suffix = candidate_key[len(parent_key) :].strip()
+    return bool(
+        re.fullmatch(
+            r"(?:year|part|season|arc)\s+[0-9]+(?:\s+(?:part|arc)\s+[0-9]+)?",
+            suffix,
+        )
+    )
+
+
+def qualify_numbered_subseries_badge(
+    title: str,
+    volume_label: str | None,
+) -> str | None:
+    if not volume_label:
+        return None
+    match = re.search(
+        r"\b(year|part|season|arc)\s+([0-9]+)\b"
+        r".*?\b(?:volume|vol\.?)\s*[0-9]",
+        title,
+        re.IGNORECASE,
+    )
+    if not match:
+        return volume_label
+    prefixes = {
+        "year": "Yr.",
+        "part": "Pt.",
+        "season": "S.",
+        "arc": "Arc",
+    }
+    prefix = prefixes[match.group(1).casefold()]
+    catalog_volume = re.search(
+        r"\b(?:volume|vol\.?)\s*([0-9]+(?:\.[0-9]+)?)",
+        volume_label,
+        re.IGNORECASE,
+    )
+    if catalog_volume:
+        volume_label = f"Vol. {normalize_volume_number(catalog_volume.group(1))}"
+    return f"{prefix} {match.group(2)} · {volume_label}"
+
+
 def parent_hint_aliases(hints: list[str], url: str) -> list[tuple[str, str]]:
     aliases: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -4158,11 +4203,18 @@ def list_books(
                 book["latest_series_title"],
                 book["original_post_url"] or book["url"],
             )
-            if latest_volume_label:
+            if latest_volume_label and not is_numbered_subseries_title(
+                series_title,
+                latest_series_title,
+            ):
                 series_title = latest_series_title
         volume_label = prefer_catalog_volume_badge(
             volume_label,
             book["catalog_volume_label"],
+        )
+        volume_label = qualify_numbered_subseries_badge(
+            book["title"],
+            volume_label,
         )
         series_url = (
             book["original_post_url"]

@@ -1797,6 +1797,80 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(saved[volume.url]["volume_label"], "Vol. 19")
 
+    def test_numbered_school_year_does_not_replace_parent_series_title(self):
+        series = server.Book(
+            "CLASSROOM OF THE ELITE LIGHT NOVEL ALL VOLUMES EPUB",
+            "https://jnovels.com/classroom-of-the-elite-light-novel-all-volumes-epub/",
+            None,
+            "2025-01-01",
+        )
+        year_two = server.Book(
+            "Classroom of the Elite Year 2 Vol. 12.5 Epub",
+            "https://jnovels.com/classroom-of-the-elite-year-2-vol-12-5-epub/",
+            None,
+            "2025-11-20",
+        )
+        year_three = server.Book(
+            "Classroom of the Elite year 3 Volume 1 Epub",
+            "https://jnovels.com/classroom-of-the-elite-year-3-volume-1-epub/",
+            None,
+            "2026-04-03",
+        )
+        server.upsert_books([series, year_two, year_three])
+        server.update_book_details(
+            year_two.url,
+            server.PostDetails(
+                "volume",
+                series.url,
+                "https://files.example/year-2-volume-12-5",
+            ),
+        )
+        server.update_book_details(
+            year_three.url,
+            server.PostDetails(
+                "volume",
+                series.url,
+                "https://files.example/year-3-volume-1",
+            ),
+        )
+        server.replace_series_volumes(
+            series.url,
+            [
+                server.SeriesVolume(
+                    "Year 2 Volume 12.5",
+                    "https://files.example/year-2-volume-12-5",
+                    0,
+                ),
+                server.SeriesVolume(
+                    "Year 3 Volume 1",
+                    "https://files.example/year-3-volume-1",
+                    1,
+                ),
+            ],
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+
+        self.assertEqual(saved[series.url]["series_title"], "Classroom of the Elite")
+        self.assertEqual(
+            saved[year_two.url]["series_title"],
+            "Classroom of the Elite",
+        )
+        self.assertEqual(
+            saved[year_three.url]["series_title"],
+            "Classroom of the Elite",
+        )
+        self.assertEqual(
+            saved[year_two.url]["volume_label"],
+            "Yr. 2 · Vol. 12.5",
+        )
+        self.assertEqual(
+            saved[year_three.url]["volume_label"],
+            "Yr. 3 · Vol. 1",
+        )
+
     def test_named_sequel_does_not_replace_parent_series_title(self):
         series = server.Book(
             "Download JK Haru is a sex worker in another world EPUB",
