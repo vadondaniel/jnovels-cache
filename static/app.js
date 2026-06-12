@@ -12,6 +12,7 @@ const state = {
   filter: "all",
   filterCounts: {},
   syncNotice: null,
+  entryUrl: null,
 };
 
 const defaultSort = "published_desc";
@@ -113,6 +114,7 @@ function applyViewFromUrl() {
   const entryFilter = params.get("filter") || "all";
 
   elements.search.value = params.get("q") || "";
+  state.entryUrl = params.get("entry") || null;
   updateSearchClearButton();
   elements.sort.value = validSorts.has(sort) ? sort : defaultSort;
   state.filter = validFilters.has(entryFilter) ? entryFilter : "all";
@@ -123,13 +125,14 @@ function applyViewFromUrl() {
 
 function syncViewUrl(mode = "replace") {
   const url = new URL(window.location.href);
-  ["q", "sort", "filter", "page"].forEach((key) => url.searchParams.delete(key));
+  ["q", "sort", "filter", "page", "entry"].forEach((key) => url.searchParams.delete(key));
 
   const query = elements.search.value.trim();
   if (query) url.searchParams.set("q", query);
   if (elements.sort.value !== defaultSort) url.searchParams.set("sort", elements.sort.value);
   if (state.filter !== "all") url.searchParams.set("filter", state.filter);
   if (state.page > 1) url.searchParams.set("page", String(state.page));
+  if (state.entryUrl) url.searchParams.set("entry", state.entryUrl);
 
   const method = mode === "push" ? "pushState" : "replaceState";
   window.history[method]({}, "", url);
@@ -431,6 +434,19 @@ function renderSeriesInformation(container, book) {
   container.append(fragment);
 }
 
+async function showCachedReference(volume) {
+  if (!volume.post_url) return;
+
+  elements.catalogDialog.close();
+  elements.search.value = volume.displayLabel || "";
+  updateSearchClearButton();
+  updateSourceSearchLink();
+  state.filter = "all";
+  state.entryUrl = volume.post_url;
+  state.page = 1;
+  await loadBooks({ scroll: true, historyMode: "push" });
+}
+
 function renderPagination(payload) {
   state.page = payload.page;
   state.pageSize = payload.page_size;
@@ -527,33 +543,75 @@ async function openCatalog(book) {
       const list = document.createElement("div");
       group.className = "catalog-dialog__group";
       list.className = "catalog-dialog__volume-grid";
+      list.classList.toggle(
+        "is-related",
+        volumes.some((volume) => volume.is_internal_reference),
+      );
       if (groupName) {
         const heading = document.createElement("h3");
         heading.textContent = groupName;
         group.append(heading);
       }
       volumes.forEach((volume) => {
+        const hasCachedTarget = Boolean(
+          volume.is_internal_reference && volume.post_url,
+        );
+        if (volume.is_internal_reference) {
+          const card = document.createElement("article");
+          const info = document.createElement("div");
+          const label = document.createElement("strong");
+          const date = document.createElement("small");
+          const actions = document.createElement("div");
+          card.className = "catalog-dialog__related-entry";
+          info.className = "catalog-dialog__related-info";
+          actions.className = "catalog-dialog__related-actions";
+          label.textContent = volume.displayLabel;
+          date.textContent = hasCachedTarget && volume.published_at
+            ? `Cached ${formatDate(volume.published_at)}`
+            : hasCachedTarget
+              ? "Cached entry"
+              : "Not in cache";
+          date.classList.toggle("is-known", Boolean(volume.published_at));
+          info.append(label, date);
+
+          if (hasCachedTarget) {
+            const cacheButton = document.createElement("button");
+            cacheButton.type = "button";
+            cacheButton.textContent = "View cache";
+            cacheButton.addEventListener("click", () => showCachedReference(volume));
+            actions.append(cacheButton);
+          }
+
+          const sourceLink = document.createElement("a");
+          sourceLink.href = volume.download_url;
+          sourceLink.target = "_blank";
+          sourceLink.rel = "noopener";
+          sourceLink.textContent = "JNovels ↗";
+          sourceLink.setAttribute(
+            "aria-label",
+            `Open ${volume.displayLabel} on JNovels`,
+          );
+          actions.append(sourceLink);
+          card.append(info, actions);
+          list.append(card);
+          return;
+        }
+
         const link = document.createElement("a");
         const text = document.createElement("span");
         const label = document.createElement("strong");
         const date = document.createElement("small");
         const arrow = document.createElement("span");
+        link.className = "catalog-dialog__volume-link";
         link.href = volume.download_url;
         link.target = "_blank";
         link.rel = "noopener";
-        link.classList.toggle("is-reference", volume.is_internal_reference);
         label.textContent = volume.displayLabel;
-        if (volume.is_internal_reference) {
-          date.textContent = volume.published_at
-            ? `Entry published ${formatDate(volume.published_at)}`
-            : "Related JNovels entry";
-        } else {
-          date.textContent = volume.published_at
-            ? `Released ${formatDate(volume.published_at)}`
-            : "Release date unavailable";
-        }
+        date.textContent = volume.published_at
+          ? `Released ${formatDate(volume.published_at)}`
+          : "Release date unavailable";
         date.classList.toggle("is-known", Boolean(volume.published_at));
-        arrow.textContent = volume.is_internal_reference ? "Entry ↗" : "↗";
+        arrow.textContent = "↗";
         arrow.className = "catalog-dialog__link-kind";
         arrow.setAttribute("aria-hidden", "true");
         text.append(label, date);
@@ -582,12 +640,13 @@ elements.detailsDialog.addEventListener("click", (event) => {
 async function loadBooks({ scroll = false, historyMode = null } = {}) {
   const sequence = ++state.loadSequence;
   const params = new URLSearchParams({
-    q: elements.search.value.trim(),
+    q: state.entryUrl ? "" : elements.search.value.trim(),
     sort: elements.sort.value,
     filter: state.filter,
     page: String(state.page),
     page_size: String(state.pageSize),
   });
+  if (state.entryUrl) params.set("entry_url", state.entryUrl);
   const payload = await request(`/api/books?${params}`);
   if (sequence !== state.loadSequence) return;
   state.filterCounts = payload.filter_counts || {};
@@ -1002,6 +1061,7 @@ async function startPageLoadCatchup() {
 
 elements.search.addEventListener("input", () => {
   clearTimeout(state.searchTimer);
+  state.entryUrl = null;
   state.page = 1;
   updateSearchClearButton();
   updateSourceSearchLink();
@@ -1012,9 +1072,10 @@ elements.search.addEventListener("input", () => {
 });
 
 elements.searchClear.addEventListener("click", () => {
-  if (!elements.search.value) return;
+  if (!elements.search.value && !state.entryUrl) return;
   clearTimeout(state.searchTimer);
   elements.search.value = "";
+  state.entryUrl = null;
   state.page = 1;
   updateSearchClearButton();
   updateSourceSearchLink();
@@ -1032,6 +1093,7 @@ elements.filterButtons.forEach((button) => {
     const nextFilter = button.dataset.filter;
     if (!validFilters.has(nextFilter) || nextFilter === state.filter) return;
     state.filter = nextFilter;
+    state.entryUrl = null;
     state.page = 1;
     updateFilterButtons();
     loadBooks({ historyMode: "push" }).catch((error) => showToast(error.message, true));

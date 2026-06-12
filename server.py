@@ -3972,7 +3972,14 @@ def parse_search_terms(query: str) -> list[str]:
     return terms
 
 
-def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, ...]]:
+def book_filter(
+    query: str,
+    entry_filter: str = "all",
+    exact_url: str | None = None,
+) -> tuple[str, tuple[str, ...]]:
+    if exact_url:
+        return " WHERE books.url = ?", (exact_url,)
+
     conditions: list[str] = []
     params: list[str] = []
     if query:
@@ -4067,8 +4074,12 @@ def book_filter(query: str, entry_filter: str = "all") -> tuple[str, tuple[str, 
     return f" WHERE {' AND '.join(conditions)}", tuple(params)
 
 
-def count_books(query: str, entry_filter: str = "all") -> int:
-    where_clause, params = book_filter(query, entry_filter)
+def count_books(
+    query: str,
+    entry_filter: str = "all",
+    exact_url: str | None = None,
+) -> int:
+    where_clause, params = book_filter(query, entry_filter, exact_url)
     with connect_db() as connection:
         return connection.execute(
             f"SELECT COUNT(*) FROM books{where_clause}",
@@ -4159,6 +4170,7 @@ def list_books(
     limit: int | None = None,
     offset: int = 0,
     entry_filter: str = "all",
+    exact_url: str | None = None,
 ) -> list[dict[str, Any]]:
     order_by = {
         "published_desc": (
@@ -4178,7 +4190,7 @@ def list_books(
         "source_order IS NULL, source_order ASC, id ASC",
     )
 
-    where_clause, filter_params = book_filter(query, entry_filter)
+    where_clause, filter_params = book_filter(query, entry_filter, exact_url)
     sql = """
         SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
                source_order,
@@ -4432,6 +4444,7 @@ class AppHandler(SimpleHTTPRequestHandler):
         if parsed.path == "/api/books":
             params = urllib.parse.parse_qs(parsed.query)
             query = params.get("q", [""])[0].strip()
+            exact_url = params.get("entry_url", [""])[0].strip() or None
             sort = params.get("sort", ["published_desc"])[0]
             entry_filter = params.get("filter", ["all"])[0].strip().casefold()
             if entry_filter not in {
@@ -4454,7 +4467,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 ),
                 MAX_PAGE_SIZE,
             )
-            count = count_books(query, entry_filter)
+            count = count_books(query, entry_filter, exact_url)
             pages = max(1, (count + page_size - 1) // page_size)
             page = min(page, pages)
             books = list_books(
@@ -4463,6 +4476,7 @@ class AppHandler(SimpleHTTPRequestHandler):
                 page_size,
                 (page - 1) * page_size,
                 entry_filter,
+                exact_url,
             )
             self.send_json(
                 {

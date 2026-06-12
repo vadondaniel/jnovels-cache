@@ -1156,26 +1156,26 @@ button, a { -webkit-tap-highlight-color: transparent; }
   background: var(--line);
 }
 
-.catalog-dialog__volume-grid a {
+.catalog-dialog__volume-link {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  width: 100%;
   min-height: 52px;
   padding: 12px 14px;
+  border: 0;
   color: var(--ink);
   background: var(--surface-raised);
+  cursor: pointer;
+  font-family: inherit;
   font-size: .82rem;
   font-weight: 700;
+  text-align: left;
   text-decoration: none;
 }
 
-.catalog-dialog__volume-grid a.is-reference {
-  background: var(--group-surface);
-  box-shadow: inset 3px 0 0 var(--gold);
-}
-
-.catalog-dialog__volume-grid a > span:first-child {
+.catalog-dialog__volume-link > span:first-child {
   display: flex;
   min-width: 0;
   flex-direction: column;
@@ -1204,9 +1204,82 @@ button, a { -webkit-tap-highlight-color: transparent; }
   white-space: nowrap;
 }
 
-.catalog-dialog__volume-grid a:hover {
+.catalog-dialog__volume-link:hover,
+.catalog-dialog__volume-link:focus-visible {
   color: var(--gold-dark);
   background: var(--hover-surface);
+  outline: none;
+}
+
+.catalog-dialog__volume-grid.is-related {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.catalog-dialog__related-entry {
+  display: flex;
+  min-width: 0;
+  min-height: 104px;
+  padding: 14px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--group-surface);
+}
+
+.catalog-dialog__related-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.catalog-dialog__related-info strong {
+  font: 600 .86rem/1.25 var(--font-serif);
+}
+
+.catalog-dialog__related-info small {
+  color: var(--muted);
+  font-size: .67rem;
+  font-weight: 500;
+}
+
+.catalog-dialog__related-info small.is-known {
+  color: var(--gold-dark);
+}
+
+.catalog-dialog__related-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.catalog-dialog__related-actions button,
+.catalog-dialog__related-actions a {
+  padding: 0;
+  border: 0;
+  color: var(--gold-dark);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: .68rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.catalog-dialog__related-actions button {
+  padding: 6px 9px;
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-xs);
+  color: var(--ink);
+  background: var(--gold-wash);
+}
+
+.catalog-dialog__related-actions button:hover,
+.catalog-dialog__related-actions button:focus-visible,
+.catalog-dialog__related-actions a:hover,
+.catalog-dialog__related-actions a:focus-visible {
+  color: var(--ink);
+  outline: none;
 }
 
 .catalog-dialog__footer {
@@ -1364,6 +1437,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   .book-card h2 { font-size: .91rem; }
   .book-card__open { display: none; }
   .catalog-dialog__volume-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .catalog-dialog__volume-grid.is-related { grid-template-columns: 1fr; }
   .pagination { display: grid; grid-template-columns: repeat(4, 1fr); }
   .pagination__jump { grid-column: 1 / -1; grid-row: 1; }
   .pagination button { padding-inline: 8px; }

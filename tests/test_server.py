@@ -1407,6 +1407,39 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([book["title"] for book in books], ["100% Example"])
         self.assertEqual(count, 1)
 
+    def test_exact_url_lookup_ignores_title_and_visibility_filters(self):
+        target = server.Book(
+            "Title with Difficult: Punctuation!",
+            "https://example/exact-entry",
+            None,
+            None,
+        )
+        other = server.Book(
+            "Title with Difficult Punctuation",
+            "https://example/other-entry",
+            None,
+            None,
+        )
+        server.upsert_books([target, other])
+        server.set_series_preference(target.url, hidden=True)
+
+        books = server.list_books(
+            "unrelated query",
+            "title_asc",
+            entry_filter="all",
+            exact_url=target.url,
+        )
+
+        self.assertEqual([book["url"] for book in books], [target.url])
+        self.assertEqual(
+            server.count_books(
+                "unrelated query",
+                entry_filter="all",
+                exact_url=target.url,
+            ),
+            1,
+        )
+
     def test_search_terms_are_order_independent_and_noncontiguous(self):
         matching = server.Book(
             "How a Realist Hero Rebuilt the Kingdom Volume 21",
@@ -3339,6 +3372,18 @@ class DatabaseTests(unittest.TestCase):
         self.assertTrue(saved["is_internal_reference"])
         self.assertEqual(saved["published_at"], "2026-06-08")
         self.assertEqual(saved["post_url"], related_url)
+
+    def test_uncached_internal_catalog_reference_has_no_cached_destination(self):
+        series_url = "https://jnovels.com/example-series/"
+        related_url = "https://jnovels.com/uncached-side-story/"
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Side Story", related_url, 0)],
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+        self.assertTrue(saved["is_internal_reference"])
+        self.assertIsNone(saved["post_url"])
 
     def test_uses_best_matching_catalog_when_source_parent_has_no_catalog(self):
         correct_series = "https://jnovels.com/download-example-series-all-volumes-epub/"
