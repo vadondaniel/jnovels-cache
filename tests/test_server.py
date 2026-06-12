@@ -893,6 +893,22 @@ class ParserTests(unittest.TestCase):
         )
         self.assertIsNone(server.compact_catalog_volume_badge("Complete edition"))
 
+    def test_catalog_subdivision_refines_plain_post_volume_badge(self):
+        self.assertEqual(
+            server.prefer_catalog_volume_badge(
+                "Vol. 11",
+                "Volume 11 Canto I",
+            ),
+            "Vol. 11.1",
+        )
+        self.assertEqual(
+            server.prefer_catalog_volume_badge(
+                "Vol. 11.2",
+                "Volume 11 Canto I",
+            ),
+            "Vol. 11.2",
+        )
+
 
 class DatabaseTests(unittest.TestCase):
     def setUp(self):
@@ -1598,6 +1614,80 @@ class DatabaseTests(unittest.TestCase):
         )
         self.assertEqual(saved[volume.url]["volume_label"], "Vol. 19")
 
+    def test_named_sequel_does_not_replace_parent_series_title(self):
+        series = server.Book(
+            "Download JK Haru is a sex worker in another world EPUB",
+            "https://jnovels.com/download-jk-haru-is-a-sex-worker-in-another-world-epub/",
+            None,
+            "2018-09-20",
+        )
+        sequel = server.Book(
+            "Download JK Haru is a Sex Worker in Another World: Summer Light Novel Epub",
+            "https://jnovels.com/download-jk-haru-summer-light-novel-epub/",
+            None,
+            "2019-08-17",
+        )
+        server.upsert_books([series, sequel])
+        server.update_book_details(
+            sequel.url,
+            server.PostDetails(
+                "volume",
+                series.url,
+                "https://files.example/summer",
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+
+        self.assertEqual(
+            saved[series.url]["series_title"],
+            "JK Haru is a sex worker in another world",
+        )
+        self.assertEqual(
+            saved[sequel.url]["series_title"],
+            "JK Haru is a sex worker in another world",
+        )
+
+    def test_catalog_canto_refines_plain_cached_post_title(self):
+        series_url = "https://jnovels.com/example-series-epub/"
+        volume = server.Book(
+            "Example Series Volume 11 Epub",
+            "https://jnovels.com/example-series-volume-11-epub/",
+            None,
+            "2026-01-01",
+        )
+        server.upsert_books(
+            [
+                server.Book("Example Series EPUB", series_url, None, None),
+                volume,
+            ]
+        )
+        server.update_book_details(
+            volume.url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/v11-canto-1",
+            ),
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume(
+                    "Volume 11 Canto I",
+                    "https://files.example/v11-canto-1",
+                    0,
+                )
+            ],
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+        self.assertEqual(saved[volume.url]["volume_label"], "Vol. 11.1")
+
     def test_updates_second_pass_details(self):
         book = server.Book("Volume 16", "https://example/book", None, "2026-01-01")
         server.upsert_books([book])
@@ -1615,6 +1705,34 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["original_post_url"], "https://example/series")
         self.assertEqual(saved["download_url"], "https://files.example/download")
         self.assertIsNotNone(saved["detail_cached_at"])
+
+    def test_refreshing_known_series_does_not_reinfer_parent(self):
+        series_url = "https://jnovels.com/known-series/"
+        server.upsert_books([server.Book("Known Series", series_url, None, None)])
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE books SET entry_type = 'series' WHERE url = ?",
+                (series_url,),
+            )
+
+        with patch.object(server, "infer_series_parent") as infer_parent:
+            server.update_book_details(
+                series_url,
+                server.PostDetails(
+                    "series",
+                    None,
+                    "https://files.example/v1",
+                    [
+                        server.SeriesVolume(
+                            "Volume 1",
+                            "https://files.example/v1",
+                            0,
+                        )
+                    ],
+                ),
+            )
+
+        infer_parent.assert_not_called()
 
     def test_series_metadata_is_searchable_and_propagated_to_volume_entries(self):
         series_url = "https://example/series"
@@ -2468,6 +2586,174 @@ class DatabaseTests(unittest.TestCase):
             ["Volume 1", "Volume 2", "Volume 3"],
         )
 
+    def test_source_refresh_replaces_old_groups_and_skips_duplicate_children(self):
+        series_url = "https://jnovels.com/example-all-volumes-epub/"
+        child_url = "https://jnovels.com/example-volume-1-epub/"
+        partial_url = "https://jnovels.com/example-volume-1-prologue-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example All Volumes EPUB", series_url, None, None),
+                server.Book("Example Volume 1 EPUB", child_url, None, "2026-01-01"),
+                server.Book(
+                    "Example Volume 1 Prologue EPUB",
+                    partial_url,
+                    None,
+                    "2026-01-02",
+                ),
+            ]
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/source-v1",
+                    0,
+                    "Official translation",
+                ),
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/old-fan-v1",
+                    1,
+                    "Fan translation",
+                ),
+            ],
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/alternate-v1",
+            ),
+        )
+        server.update_book_details(
+            partial_url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/v1-prologue",
+            ),
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/source-v1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/source-v1",
+                        0,
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/source-v2",
+                        1,
+                    ),
+                ],
+            ),
+        )
+
+        self.assertEqual(
+            [
+                (volume["release_group"], volume["label"])
+                for volume in server.list_series_volumes(series_url)
+            ],
+            [
+                (None, "Volume 1"),
+                (None, "Volume 2"),
+            ],
+        )
+
+    def test_orphan_catalog_merge_does_not_invent_translation_groups(self):
+        orphaned_url = "https://jnovels.com/example-modern-title/"
+        canonical_url = "https://jnovels.com/example-legacy-title/"
+        server.replace_series_volumes(
+            orphaned_url,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/modern-v1",
+                    0,
+                )
+            ],
+        )
+
+        server.merge_orphaned_catalog(
+            orphaned_url,
+            canonical_url,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/legacy-v1",
+                    0,
+                )
+            ],
+        )
+
+        self.assertEqual(
+            [
+                (volume["release_group"], volume["label"])
+                for volume in server.list_series_volumes(canonical_url)
+            ],
+            [(None, "Volume 1"), (None, "Volume 1")],
+        )
+
+    def test_orphan_catalog_merge_deduplicates_shared_downloads(self):
+        orphaned_url = "https://jnovels.com/example-modern-title/"
+        canonical_url = "https://jnovels.com/example-legacy-title/"
+        shared_download = "https://files.example/shared-v1"
+        server.replace_series_volumes(
+            orphaned_url,
+            [server.SeriesVolume("Volume 1", shared_download, 0)],
+        )
+
+        server.merge_orphaned_catalog(
+            orphaned_url,
+            canonical_url,
+            [server.SeriesVolume("Volume 1", shared_download, 0)],
+        )
+
+        self.assertEqual(
+            [
+                (volume["label"], volume["download_url"])
+                for volume in server.list_series_volumes(canonical_url)
+            ],
+            [("Volume 1", shared_download)],
+        )
+
+    def test_known_official_series_applies_group_to_current_source_catalog(self):
+        series_url = "https://jnovels.com/no-game-no-life-all-volumes-epub/"
+        server.upsert_books(
+            [server.Book("No Game No Life All Volumes EPUB", series_url, None, None)]
+        )
+
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+
+        self.assertEqual(
+            [
+                (volume["release_group"], volume["label"])
+                for volume in server.list_series_volumes(series_url)
+            ],
+            [
+                ("Official translation", "Volume 1"),
+                ("Official translation", "Volume 2"),
+            ],
+        )
+
     def test_cleanup_reparents_children_of_misclassified_series_volume(self):
         correct_parent = "https://jnovels.com/example-all-volumes-epub/"
         wrong_parent = "https://jnovels.com/example-volume-10-epub/"
@@ -2924,6 +3210,26 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(book["entry_type"], "series")
         self.assertIsNone(book["original_post_url"])
         self.assertIsNone(status["metadata_checked_at"])
+
+    def test_parser_revision_queues_existing_series_metadata_once(self):
+        series_url = "https://jnovels.com/example-series/"
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+        server.mark_series_metadata_checked(series_url)
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE metadata SET value = ? WHERE key = ?",
+                ("older", server.SERIES_METADATA_PARSER_KEY),
+            )
+
+        self.assertEqual(server.prepare_series_metadata_refresh(), 1)
+        self.assertEqual(
+            server.get_series_metadata_backfill_urls(10),
+            [series_url],
+        )
+        self.assertEqual(server.prepare_series_metadata_refresh(), 0)
 
     def test_finds_series_stale_by_age_or_newer_cached_volume(self):
         old_series = "https://example/old-series"

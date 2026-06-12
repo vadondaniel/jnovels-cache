@@ -37,9 +37,23 @@ SERIES_STALE_DAYS = 30
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
+SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
+SERIES_METADATA_PARSER_VERSION = "4"
 EXCLUDED_SEARCH_PATHS = {
     "/light-novel-epub-jp/",
     "/top-light-novels-to-read/",
+}
+SERIES_RELEASE_GROUP_OVERRIDES = {
+    "https://jnovels.com/no-game-no-life-all-volumes-epub": "Official translation",
+}
+PARTIAL_GROUP_PRESERVE_SERIES = {
+    "https://jnovels.com/download-eiyuu-kyoushitsu-epub",
+}
+MERGED_CATALOG_GROUP_OVERRIDES = {
+    "https://jnovels.com/download-eiyuu-kyoushitsu-epub": (
+        "Official translation",
+        "Fan translation",
+    ),
 }
 
 _catalog_index_lock = threading.Lock()
@@ -848,6 +862,27 @@ def compact_catalog_volume_badge(label: str | None) -> str | None:
     return compact_volume_badge(match.group(1), label[match.end() :])
 
 
+def prefer_catalog_volume_badge(
+    parsed_badge: str | None,
+    catalog_label: str | None,
+) -> str | None:
+    catalog_badge = compact_catalog_volume_badge(catalog_label)
+    if not parsed_badge:
+        return catalog_badge
+    if not catalog_badge:
+        return parsed_badge
+    parsed_plain = re.fullmatch(r"Vol\. ([0-9]+)", parsed_badge)
+    catalog_volume = re.match(r"Vol\. ([0-9]+)(?:\.|\s)", catalog_badge)
+    if (
+        parsed_plain
+        and catalog_volume
+        and parsed_plain.group(1) == catalog_volume.group(1)
+        and catalog_badge != parsed_badge
+    ):
+        return catalog_badge
+    return parsed_badge
+
+
 def normalize_legacy_title_case(value: str) -> str:
     letters = [character for character in value if character.isalpha()]
     if not letters or any(character.islower() for character in letters):
@@ -1390,6 +1425,7 @@ def initialize_db() -> None:
         )
     build_missing_fallback_catalogs()
     prepare_legacy_reparse()
+    prepare_series_metadata_refresh()
     prune_pdf_duplicates()
     cleanup_misclassified_series_tracking()
     reconcile_legacy_volume_entries()
@@ -1539,6 +1575,7 @@ def get_public_metadata(
     metadata.pop(SYNC_CHECKPOINT_KEY, None)
     metadata.pop(LEGACY_REPARSE_KEY, None)
     metadata.pop(LEGACY_VOLUME_RECONCILE_KEY, None)
+    metadata.pop(SERIES_METADATA_PARSER_KEY, None)
     return metadata
 
 
@@ -1580,6 +1617,34 @@ def prepare_legacy_reparse() -> int:
         connection.execute(
             "INSERT INTO metadata (key, value) VALUES (?, ?)",
             (LEGACY_REPARSE_KEY, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+    return changes
+
+
+def prepare_series_metadata_refresh() -> int:
+    with connect_db() as connection:
+        current_version = connection.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (SERIES_METADATA_PARSER_KEY,),
+        ).fetchone()
+        if current_version and current_version["value"] == SERIES_METADATA_PARSER_VERSION:
+            return 0
+
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE series_status
+            SET metadata_checked_at = NULL
+            WHERE unavailable_at IS NULL
+            """
+        )
+        changes = connection.total_changes - before
+        connection.execute(
+            """
+            INSERT INTO metadata (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (SERIES_METADATA_PARSER_KEY, SERIES_METADATA_PARSER_VERSION),
         )
     return changes
 
@@ -2069,7 +2134,11 @@ def group_orphan_volume_families() -> int:
 def update_book_details(url: str, details: PostDetails) -> None:
     inferred_parent: str | None = None
     orphaned_parent: str | None = None
-    if details.entry_type == "series" and not details.original_post_url:
+    if (
+        details.entry_type == "series"
+        and not details.original_post_url
+        and not is_established_series_book(url)
+    ):
         volume_label_hint = next(
             (
                 volume.label
@@ -2145,7 +2214,10 @@ def update_book_details(url: str, details: PostDetails) -> None:
     elif details.entry_type == "series":
         replace_series_volumes(
             url,
-            preserve_grouped_catalog(url, details.volumes),
+            apply_series_release_group_override(
+                url,
+                preserve_groups_for_partial_refresh(url, details.volumes),
+            ),
         )
         build_fallback_catalog(url)
         mark_series_metadata_checked(url, now)
@@ -2203,12 +2275,34 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
     invalidate_catalog_indexes()
 
 
-def preserve_grouped_catalog(
+def apply_series_release_group_override(
+    series_url: str,
+    volumes: list[SeriesVolume],
+) -> list[SeriesVolume]:
+    release_group = SERIES_RELEASE_GROUP_OVERRIDES.get(canonical_page_url(series_url))
+    if not release_group:
+        return volumes
+    return [
+        SeriesVolume(
+            volume.label,
+            volume.download_url,
+            volume.position,
+            volume.release_group or release_group,
+            volume.source_list,
+        )
+        for volume in volumes
+    ]
+
+
+def preserve_groups_for_partial_refresh(
     series_url: str,
     refreshed_volumes: list[SeriesVolume],
 ) -> list[SeriesVolume]:
-    if not refreshed_volumes or any(
-        volume.release_group for volume in refreshed_volumes
+    if (
+        canonical_page_url(series_url) not in PARTIAL_GROUP_PRESERVE_SERIES
+        or not refreshed_volumes
+        or len(refreshed_volumes) > 2
+        or any(volume.release_group for volume in refreshed_volumes)
     ):
         return refreshed_volumes
 
@@ -2248,7 +2342,7 @@ def preserve_grouped_catalog(
         if row["release_group"] != refreshed_group
     ]
     preserved_downloads = {volume.download_url for volume in preserved}
-    grouped_refresh = [
+    return preserved + [
         SeriesVolume(
             volume.label,
             volume.download_url,
@@ -2258,7 +2352,6 @@ def preserve_grouped_catalog(
         for index, volume in enumerate(refreshed_volumes)
         if volume.download_url not in preserved_downloads
     ]
-    return preserved + grouped_refresh
 
 
 def merge_orphaned_catalog(
@@ -2277,12 +2370,15 @@ def merge_orphaned_catalog(
             (orphaned_series_url,),
         ).fetchall()
 
+    group_override = MERGED_CATALOG_GROUP_OVERRIDES.get(
+        canonical_page_url(canonical_series_url)
+    )
     official = [
         SeriesVolume(
             row["label"],
             row["download_url"],
             index,
-            row["release_group"] or "Official translation",
+            row["release_group"] or (group_override[0] if group_override else None),
         )
         for index, row in enumerate(orphaned_rows)
     ]
@@ -2291,12 +2387,25 @@ def merge_orphaned_catalog(
             volume.label,
             volume.download_url,
             len(official) + index,
-            volume.release_group or "Fan translation",
+            volume.release_group or (group_override[1] if group_override else None),
         )
         for index, volume in enumerate(canonical_volumes)
         if re.match(r"^Volume\s+[0-9]", volume.label, re.IGNORECASE)
     ]
-    merged = official + fan
+    merged = []
+    seen_downloads: set[str] = set()
+    for volume in official + fan:
+        if volume.download_url in seen_downloads:
+            continue
+        seen_downloads.add(volume.download_url)
+        merged.append(
+            SeriesVolume(
+                volume.label,
+                volume.download_url,
+                len(merged),
+                volume.release_group,
+            )
+        )
     if not merged:
         return 0
 
@@ -2388,49 +2497,17 @@ def build_fallback_catalog(
         )
         for row in rows
     ]
-    duplicate_label_categories = not dedupe_labels and any(
-        label
-        and any(
-            existing["label"].casefold() == label.casefold()
-            and existing["download_url"] != download_url
-            for existing in existing_rows
-        )
-        for label, download_url in child_releases
-    )
-    if duplicate_label_categories:
-        with connect_db() as connection:
-            connection.execute(
-                """
-                UPDATE series_volumes
-                SET release_group = 'Fan translation'
-                WHERE series_url = ?
-                  AND release_group IS NULL
-                """,
-                (series_url,),
-            )
-
-    existing_labels = {
-        (
-            row["label"].casefold(),
-            (
-                row["release_group"]
-                or ("Fan translation" if duplicate_label_categories else "")
-            ).casefold(),
-        )
-        for row in existing_rows
-    }
+    existing_labels = {row["label"].casefold() for row in existing_rows}
     existing_downloads = {row["download_url"] for row in existing_rows}
     next_position = max((row["position"] for row in existing_rows), default=-1) + 1
     volumes: list[SeriesVolume] = []
     for label, download_url in child_releases:
-        release_group = "Official translation" if duplicate_label_categories else None
-        label_key = (
-            (label or "").casefold(),
-            (release_group or "").casefold(),
-        )
+        label_key = (label or "").casefold()
+        base_volume = re.match(r"^(volume\s+[0-9]+(?:\.[0-9]+)?)\s+", label_key)
         if (
             not label
             or label_key in existing_labels
+            or (base_volume and base_volume.group(1) in existing_labels)
             or download_url in existing_downloads
         ):
             continue
@@ -2441,7 +2518,7 @@ def build_fallback_catalog(
                 label,
                 download_url,
                 next_position + len(volumes),
-                release_group,
+                None,
             )
         )
     if not volumes:
@@ -2826,6 +2903,14 @@ def is_cached_book_url(url: str) -> bool:
     with connect_db() as connection:
         return connection.execute(
             "SELECT 1 FROM books WHERE url = ?",
+            (url,),
+        ).fetchone() is not None
+
+
+def is_established_series_book(url: str) -> bool:
+    with connect_db() as connection:
+        return connection.execute(
+            "SELECT 1 FROM books WHERE url = ? AND entry_type = 'series'",
             (url,),
         ).fetchone() is not None
 
@@ -3670,8 +3755,15 @@ def list_books(
                             sibling.published_at DESC,
                             sibling.id DESC
                     LIMIT 1
-                ) AS latest_series_title,
-                COALESCE(
+                 ) AS latest_series_title,
+                 (
+                    SELECT parent.title
+                    FROM books AS parent
+                    WHERE parent.url =
+                          COALESCE(books.original_post_url, books.url)
+                    LIMIT 1
+                 ) AS parent_series_title,
+                 COALESCE(
                     (
                         SELECT own_catalog_volume.label
                         FROM series_volumes AS own_catalog_volume
@@ -3715,13 +3807,21 @@ def list_books(
         book["is_favorite"] = bool(book["is_favorite"])
         book["is_hidden"] = bool(book["is_hidden"])
         series_title, volume_label = parse_book_identity(book["title"], book["url"])
-        if book["latest_series_title"]:
+        if book["parent_series_title"]:
             series_title, _ = parse_book_identity(
+                book["parent_series_title"],
+                book["original_post_url"] or book["url"],
+            )
+        if book["latest_series_title"]:
+            latest_series_title, latest_volume_label = parse_book_identity(
                 book["latest_series_title"],
                 book["original_post_url"] or book["url"],
             )
-        volume_label = volume_label or compact_catalog_volume_badge(
-            book["catalog_volume_label"]
+            if latest_volume_label:
+                series_title = latest_series_title
+        volume_label = prefer_catalog_volume_badge(
+            volume_label,
+            book["catalog_volume_label"],
         )
         series_url = (
             book["original_post_url"]

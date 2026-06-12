@@ -478,12 +478,15 @@ async function openCatalog(book) {
     const releaseGroups = new Set(
       payload.volumes.map((volume) => volume.release_group).filter(Boolean),
     );
-    if (!isDownloadCatalog && releaseGroups.size > 1) {
-      const numberedVolumes = new Set(
-        payload.volumes
-          .map((volume) => volume.label.match(/^Volume\s+([0-9]+(?:\.[0-9]+)?)/i)?.[1])
-          .filter(Boolean),
-      ).size;
+    const numberedVolumes = new Set(
+      payload.volumes
+        .map((volume) => volume.label.match(/^Volume\s+([0-9]+(?:\.[0-9]+)?)/i)?.[1])
+        .filter(Boolean),
+    ).size;
+    if (
+      !isDownloadCatalog
+      && (releaseGroups.size > 1 || numberedVolumes < payload.count)
+    ) {
       elements.catalogEyebrow.textContent = "Cached releases";
       elements.catalogCount.textContent =
         `${payload.count} cached releases · ${numberedVolumes} volumes`;
