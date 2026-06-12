@@ -2233,11 +2233,29 @@ def update_book_details(url: str, details: PostDetails) -> None:
 
 
 def validate_post_details(details: PostDetails) -> None:
-    if not details.download_url and not details.volumes:
+    can_recover_from_parent = (
+        details.entry_type == "volume" and details.original_post_url is not None
+    )
+    if not details.download_url and not details.volumes and not can_recover_from_parent:
         raise ValueError("No download link found on the post.")
 
 
 def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None:
+    normalized_volumes: list[SeriesVolume] = []
+    seen_downloads: set[str] = set()
+    for volume in volumes:
+        if volume.download_url in seen_downloads:
+            continue
+        seen_downloads.add(volume.download_url)
+        normalized_volumes.append(
+            SeriesVolume(
+                volume.label,
+                volume.download_url,
+                len(normalized_volumes),
+                volume.release_group,
+            )
+        )
+
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with connect_db() as connection:
         connection.execute(
@@ -2259,7 +2277,7 @@ def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None
                     now,
                     volume.release_group,
                 )
-                for volume in volumes
+                for volume in normalized_volumes
             ],
         )
         connection.execute(
@@ -3365,14 +3383,20 @@ def run_sync(
             completed = False
             try:
                 details = fetch_post_details(url)
+                validate_post_details(details)
                 update_book_details(url, details)
                 if details.entry_type == "series":
                     discovered_series_urls.add(url)
                 elif details.original_post_url:
                     discovered_series_urls.add(details.original_post_url)
-                validate_post_details(details)
                 completed = True
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+                ValueError,
+                sqlite3.Error,
+            ) as exc:
                 record_detail_failure(url, exc)
                 sync_state["detail_errors"] += 1
                 completed = True
@@ -3408,10 +3432,16 @@ def run_sync(
             completed = False
             try:
                 details = fetch_post_details(series_url)
-                update_book_details(series_url, details)
                 validate_post_details(details)
+                update_book_details(series_url, details)
                 completed = True
-            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                OSError,
+                ValueError,
+                sqlite3.Error,
+            ) as exc:
                 record_detail_failure(series_url, exc)
                 sync_state["series_errors"] += 1
                 completed = True

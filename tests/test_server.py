@@ -1140,6 +1140,31 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(server.list_books("", "title_asc")[0]["volume_count"], 2)
 
+    def test_catalog_replacement_deduplicates_download_urls(self):
+        series_url = "https://jnovels.com/example-series/"
+        shared_download = "https://files.example/shared"
+
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", shared_download, 8),
+                server.SeriesVolume("Volume 1 duplicate", shared_download, 9),
+                server.SeriesVolume(
+                    "Volume 2",
+                    "https://files.example/v2",
+                    12,
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            [
+                (volume["label"], volume["position"])
+                for volume in server.list_series_volumes(series_url)
+            ],
+            [("Volume 1", 0), ("Volume 2", 1)],
+        )
+
     def test_card_catalog_count_uses_current_download_category(self):
         series_url = "https://jnovels.com/example-series/"
         child_url = "https://jnovels.com/example-series-volume-2/"
@@ -3475,6 +3500,36 @@ class SyncTests(unittest.TestCase):
         )
         self.assertEqual(server.sync_state["series_completed"], 1)
         self.assertEqual(server.sync_state["series_errors"], 0)
+
+    def test_sync_contains_sqlite_detail_failure(self):
+        book_url = "https://jnovels.com/broken-catalog/"
+        server.upsert_books(
+            [server.Book("Broken Catalog", book_url, None, "2026-06-09")]
+        )
+        details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        with (
+            patch.object(server, "fetch_post_details", return_value=details),
+            patch.object(
+                server,
+                "update_book_details",
+                side_effect=server.sqlite3.IntegrityError("duplicate catalog row"),
+            ),
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 1, 0, "repair")
+
+        self.assertIsNone(server.sync_state["error"])
+        self.assertEqual(server.sync_state["detail_errors"], 1)
+        self.assertEqual(server.sync_state["details_completed"], 1)
+        failures = server.list_repair_failures()
+        self.assertEqual(failures[0]["url"], book_url)
+        self.assertIn("duplicate catalog row", failures[0]["detail_last_error"])
 
     def test_interrupted_sync_recovers_fetched_page_details(self):
         book_url = "https://jnovels.com/interrupted-volume-1-epub/"
