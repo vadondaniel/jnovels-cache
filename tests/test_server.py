@@ -517,6 +517,34 @@ class ParserTests(unittest.TestCase):
             ],
         )
 
+    def test_preserves_named_version_groups_and_combined_volume_ranges(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p><strong>JNC version</strong></p>
+              <ol>
+                <li>VOLUME 01 <a href="https://files.example/jnc-1">DOWNLOAD</a></li>
+                <li>VOLUME 02 <a href="https://files.example/jnc-2">DOWNLOAD</a></li>
+              </ol>
+              <p><strong>GL Bunko version</strong></p>
+              <p><a href="https://files.example/gl-1-2">VOLUME 1&amp;2</a></p>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                ("JNC version", "Volume 1", "https://files.example/jnc-1"),
+                ("JNC version", "Volume 2", "https://files.example/jnc-2"),
+                ("GL Bunko version", "Volume 1–2", "https://files.example/gl-1-2"),
+            ],
+        )
+
     def test_preserves_legacy_pdf_and_epub_format_groups(self):
         parser = server.PostDetailsParser("https://jnovels.com/legacy-formats/")
         parser.feed(LEGACY_FORMAT_SERIES_HTML)
@@ -780,6 +808,10 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(
             server.extract_volume_label("VOLUME 07 FINALE"),
             "Volume 7 Finale",
+        )
+        self.assertEqual(
+            server.extract_volume_label("VOLUME 1&2"),
+            "Volume 1–2",
         )
 
     def test_keeps_latest_link_for_indistinguishable_duplicate_labels(self):

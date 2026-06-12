@@ -38,7 +38,7 @@ SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
-SERIES_METADATA_PARSER_VERSION = "4"
+SERIES_METADATA_PARSER_VERSION = "5"
 EXCLUDED_SEARCH_PATHS = {
     "/light-novel-epub-jp/",
     "/top-light-novels-to-read/",
@@ -240,6 +240,11 @@ class PostDetailsParser(HTMLParser):
                 normalized,
             ):
                 self._release_group = "Fan translation"
+            elif re.fullmatch(
+                r"[a-z0-9][a-z0-9 .&'’+\-]{0,50}\s+version",
+                normalized,
+            ):
+                self._release_group = " ".join(data.split()).strip()
             elif re.fullmatch(r"pdf\s+light", normalized):
                 self._release_group = "PDF (light)"
             elif re.fullmatch(r"pdf\s+dark", normalized):
@@ -634,7 +639,7 @@ def extract_volume_label(value: str) -> str | None:
         r"|(?:YR\s*([0-9]+))"
         r")?\s*"
         r"(?:VOLUME|VOLUMES|VOL\.?)\s*"
-        r"(ZERO|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—]\s*[0-9]+(?:\.[0-9]+)?)?)"
+        r"(ZERO|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—&]\s*[0-9]+(?:\.[0-9]+)?)?)"
         r"(\+*)",
         value,
         re.IGNORECASE,
@@ -790,7 +795,7 @@ def normalize_volume_number(value: str) -> str:
 
 
 def normalize_volume_designator(value: str) -> str:
-    parts = re.split(r"\s*[-–—]\s*", value, maxsplit=1)
+    parts = re.split(r"\s*[-–—&]\s*", value, maxsplit=1)
     if len(parts) == 2:
         return (
             f"{normalize_volume_number(parts[0])}"
