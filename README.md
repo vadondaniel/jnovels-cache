@@ -26,7 +26,7 @@ while using it. Stop the server with `Ctrl+C`.
 
 To run without a terminal window, with a tray status icon, double-click
 `run-tray.bat`. It runs without a console window. The tray menu can open the
-app, restart the server, or exit.
+app, restart the server, toggle **Start with Windows**, or exit.
 Its indicator is green while running, yellow while syncing, orange after a
 sync error, and red when the server is unavailable.
 

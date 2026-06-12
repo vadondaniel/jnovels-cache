@@ -5,7 +5,11 @@ param(
 $ErrorActionPreference = "Stop"
 $projectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $serverPath = Join-Path $projectDir "server.py"
+$hiddenLauncher = Join-Path $projectDir "launch-hidden.vbs"
+$trayScript = Join-Path $projectDir "tray.ps1"
 $appUrl = "http://127.0.0.1:$Port"
+$runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
+$startupValueName = "JNovelsCache"
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
@@ -142,6 +146,38 @@ function Open-App {
     Start-Process $appUrl
 }
 
+function Get-StartupEnabled {
+    return $null -ne (
+        Get-ItemProperty `
+            -Path $runKey `
+            -Name $startupValueName `
+            -ErrorAction SilentlyContinue
+    )
+}
+
+function Set-StartupEnabled {
+    param(
+        [bool]$Enabled
+    )
+
+    if ($Enabled) {
+        $command = 'wscript.exe //B "{0}" --sta "{1}"' -f $hiddenLauncher, $trayScript
+        New-Item -Path $runKey -Force | Out-Null
+        New-ItemProperty `
+            -Path $runKey `
+            -Name $startupValueName `
+            -Value $command `
+            -PropertyType String `
+            -Force | Out-Null
+        return
+    }
+
+    Remove-ItemProperty `
+        -Path $runKey `
+        -Name $startupValueName `
+        -ErrorAction SilentlyContinue
+}
+
 $notifyIcon = [Windows.Forms.NotifyIcon]::new()
 $notifyIcon.Visible = $true
 $menu = [Windows.Forms.ContextMenuStrip]::new()
@@ -150,12 +186,15 @@ $statusItem = [Windows.Forms.ToolStripMenuItem]::new("Starting...")
 $statusItem.Enabled = $false
 $openItem = [Windows.Forms.ToolStripMenuItem]::new("Open JNovels Cache")
 $restartItem = [Windows.Forms.ToolStripMenuItem]::new("Restart server")
+$startupItem = [Windows.Forms.ToolStripMenuItem]::new("Start with Windows")
+$startupItem.Checked = Get-StartupEnabled
 $exitItem = [Windows.Forms.ToolStripMenuItem]::new("Exit JNovels Cache")
 
 $menu.Items.Add($statusItem) | Out-Null
 $menu.Items.Add([Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $menu.Items.Add($openItem) | Out-Null
 $menu.Items.Add($restartItem) | Out-Null
+$menu.Items.Add($startupItem) | Out-Null
 $menu.Items.Add([Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $menu.Items.Add($exitItem) | Out-Null
 $notifyIcon.ContextMenuStrip = $menu
@@ -212,6 +251,25 @@ function Update-TrayState {
 
 $openItem.Add_Click({ Open-App })
 $notifyIcon.Add_DoubleClick({ Open-App })
+$menu.Add_Opening({
+    $startupItem.Checked = Get-StartupEnabled
+})
+$startupItem.Add_Click({
+    try {
+        $enabled = -not (Get-StartupEnabled)
+        Set-StartupEnabled $enabled
+        $startupItem.Checked = $enabled
+    }
+    catch {
+        $startupItem.Checked = Get-StartupEnabled
+        [Windows.Forms.MessageBox]::Show(
+            $_.Exception.Message,
+            "Could not update Windows startup",
+            [Windows.Forms.MessageBoxButtons]::OK,
+            [Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+    }
+})
 $restartItem.Add_Click({
     Stop-OwnedServer
     Start-Sleep -Milliseconds 300
