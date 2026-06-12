@@ -512,6 +512,12 @@ async function openCatalog(book) {
         && (/^Fanbook(?:\s|$)/i.test(displayLabel) || /^Royal Academy Stories/i.test(displayLabel))
       ) {
         groupName = "Related books";
+      } else if (
+        !groupName
+        && volume.is_internal_reference
+        && !/\bVolume\s+[0-9]/i.test(displayLabel)
+      ) {
+        groupName = "Related entries";
       }
       if (!grouped.has(groupName)) grouped.set(groupName, []);
       grouped.get(groupName).push({ ...volume, displayLabel });
@@ -535,12 +541,20 @@ async function openCatalog(book) {
         link.href = volume.download_url;
         link.target = "_blank";
         link.rel = "noopener";
+        link.classList.toggle("is-reference", volume.is_internal_reference);
         label.textContent = volume.displayLabel;
-        date.textContent = volume.published_at
-          ? `Released ${formatDate(volume.published_at)}`
-          : "Release date unavailable";
+        if (volume.is_internal_reference) {
+          date.textContent = volume.published_at
+            ? `Entry published ${formatDate(volume.published_at)}`
+            : "Related JNovels entry";
+        } else {
+          date.textContent = volume.published_at
+            ? `Released ${formatDate(volume.published_at)}`
+            : "Release date unavailable";
+        }
         date.classList.toggle("is-known", Boolean(volume.published_at));
-        arrow.textContent = "↗";
+        arrow.textContent = volume.is_internal_reference ? "Entry ↗" : "↗";
+        arrow.className = "catalog-dialog__link-kind";
         arrow.setAttribute("aria-hidden", "true");
         text.append(label, date);
         link.append(text, arrow);

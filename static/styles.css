@@ -1170,6 +1170,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
   text-decoration: none;
 }
 
+.catalog-dialog__volume-grid a.is-reference {
+  background: var(--group-surface);
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+
 .catalog-dialog__volume-grid a > span:first-child {
   display: flex;
   min-width: 0;
@@ -1189,6 +1194,14 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .catalog-dialog__volume-grid small.is-known {
   color: var(--gold-dark);
+}
+
+.catalog-dialog__link-kind {
+  flex: none;
+  color: var(--gold-dark);
+  font-size: .64rem;
+  font-weight: 750;
+  white-space: nowrap;
 }
 
 .catalog-dialog__volume-grid a:hover {

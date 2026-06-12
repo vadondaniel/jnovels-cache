@@ -3103,6 +3103,29 @@ class DatabaseTests(unittest.TestCase):
             ],
         )
 
+    def test_classroom_catalog_marks_primary_list_official(self):
+        series_url = (
+            "https://jnovels.com/"
+            "classroom-of-the-elite-light-novel-all-volumes-epub/"
+        )
+        volumes = server.apply_series_release_group_override(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/official", 0),
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/fan",
+                    1,
+                    "Fan translation",
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            [volume.release_group for volume in volumes],
+            ["Official translation", "Fan translation"],
+        )
+
     def test_cleanup_reparents_children_of_misclassified_series_volume(self):
         correct_parent = "https://jnovels.com/example-all-volumes-epub/"
         wrong_parent = "https://jnovels.com/example-volume-10-epub/"
@@ -3254,6 +3277,68 @@ class DatabaseTests(unittest.TestCase):
             [volume["post_url"] for volume in saved],
             [series_url, series_url],
         )
+
+    def test_catalog_dates_do_not_cross_translation_groups_by_label(self):
+        series_url = "https://jnovels.com/example-series/"
+        official_download = "https://files.example/official"
+        volume = server.Book(
+            "Example Series Volume 1 Epub",
+            "https://jnovels.com/example-series-volume-1-epub/",
+            None,
+            "2026-06-09",
+        )
+        server.upsert_books([volume])
+        server.update_book_details(
+            volume.url,
+            server.PostDetails("volume", series_url, official_download),
+        )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    official_download,
+                    0,
+                    "Official translation",
+                ),
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/fan",
+                    1,
+                    "Fan translation",
+                ),
+            ],
+        )
+
+        saved = server.list_series_volumes(series_url)
+        self.assertEqual(
+            [volume["published_at"] for volume in saved],
+            ["2026-06-09", None],
+        )
+        self.assertEqual(
+            [volume["post_url"] for volume in saved],
+            [volume.url, None],
+        )
+
+    def test_internal_catalog_reference_uses_target_entry_metadata(self):
+        series_url = "https://jnovels.com/example-series/"
+        related_url = "https://jnovels.com/example-side-story/"
+        related = server.Book(
+            "Example Side Story Epub",
+            related_url,
+            None,
+            "2026-06-08",
+        )
+        server.upsert_books([related])
+        server.replace_series_volumes(
+            series_url,
+            [server.SeriesVolume("Side Story", related_url, 0)],
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+        self.assertTrue(saved["is_internal_reference"])
+        self.assertEqual(saved["published_at"], "2026-06-08")
+        self.assertEqual(saved["post_url"], related_url)
 
     def test_uses_best_matching_catalog_when_source_parent_has_no_catalog(self):
         correct_series = "https://jnovels.com/download-example-series-all-volumes-epub/"

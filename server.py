@@ -40,7 +40,7 @@ SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
-SERIES_METADATA_PARSER_VERSION = "5"
+SERIES_METADATA_PARSER_VERSION = "6"
 SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
 SERIES_INDEX_REFRESH_KEY = "series_index_last_checked_at"
 EXCLUDED_SEARCH_PATHS = {
@@ -49,6 +49,9 @@ EXCLUDED_SEARCH_PATHS = {
 }
 SERIES_RELEASE_GROUP_OVERRIDES = {
     "https://jnovels.com/no-game-no-life-all-volumes-epub": "Official translation",
+    "https://jnovels.com/classroom-of-the-elite-light-novel-all-volumes-epub": (
+        "Official translation"
+    ),
 }
 PARTIAL_GROUP_PRESERVE_SERIES = {
     "https://jnovels.com/download-eiyuu-kyoushitsu-epub",
@@ -695,6 +698,16 @@ def canonical_page_url(value: str) -> str:
     path = parsed.path.rstrip("/") or "/"
     return urllib.parse.urlunsplit(
         (parsed.scheme.casefold(), parsed.netloc.casefold(), path, "", "")
+    )
+
+
+def is_internal_jnovels_url(value: str | None) -> bool:
+    if not value:
+        return False
+    parsed = urllib.parse.urlparse(value)
+    return (
+        parsed.scheme.casefold() in {"http", "https"}
+        and parsed.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
     )
 
 
@@ -4335,7 +4348,6 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
             SELECT title, url, download_url, published_at, entry_type,
                    original_post_url
             FROM books
-            WHERE download_url IS NOT NULL
             ORDER BY entry_type = 'volume' DESC, published_at DESC
             """
         ).fetchall()
@@ -4346,9 +4358,11 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     )
     matches: dict[str, list[sqlite3.Row]] = {}
     exact_downloads: dict[str, sqlite3.Row] = {}
+    internal_posts: dict[str, sqlite3.Row] = {}
     for book in book_rows:
         if book["download_url"]:
             exact_downloads.setdefault(book["download_url"], book)
+        internal_posts.setdefault(canonical_page_url(book["url"]), book)
         if (
             canonical_page_url(book["original_post_url"] or "") !=
             canonical_page_url(series_url)
@@ -4359,10 +4373,28 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         if label:
             matches.setdefault(label.casefold(), []).append(book)
 
+    format_groups = {"pdf", "pdf (light)", "pdf (dark)", "epub"}
+    label_categories: dict[str, set[str]] = {}
     for volume in rows:
-        book = exact_downloads.get(volume["download_url"])
-        if book is None:
-            candidates = matches.get(volume["label"].casefold(), [])
+        group = (volume["release_group"] or "").casefold()
+        category = "__format__" if group in format_groups else group or "__default__"
+        label_categories.setdefault(volume["label"].casefold(), set()).add(category)
+
+    for volume in rows:
+        internal_reference = is_internal_jnovels_url(volume["download_url"])
+        volume["is_internal_reference"] = internal_reference
+        book = (
+            internal_posts.get(canonical_page_url(volume["download_url"]))
+            if internal_reference
+            else exact_downloads.get(volume["download_url"])
+        )
+        label_key = volume["label"].casefold()
+        if (
+            book is None
+            and not internal_reference
+            and len(label_categories.get(label_key, set())) <= 1
+        ):
+            candidates = matches.get(label_key, [])
             book = max(
                 candidates,
                 key=lambda candidate: candidate["published_at"] or "",
@@ -4371,7 +4403,6 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         volume["published_at"] = book["published_at"] if book else None
         volume["post_url"] = book["url"] if book else None
 
-    format_groups = {"pdf", "pdf (light)", "pdf (dark)", "epub"}
     dated_formats: dict[str, dict[str, Any]] = {}
     for volume in rows:
         if (
