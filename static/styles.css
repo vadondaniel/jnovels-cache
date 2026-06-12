@@ -26,6 +26,11 @@
   --dark-button-text: #ffffff;
   --radius: 8px;
   --shadow: 0 16px 40px rgba(35, 30, 20, 0.1);
+  --layer-local-control: 1;
+  --layer-hero-content: 1;
+  --layer-page-overlap: 2;
+  --layer-popover: 3;
+  --layer-toast: 4;
 }
 
 * { box-sizing: border-box; }
@@ -65,7 +70,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .nav {
   position: relative;
-  z-index: 2;
+  z-index: var(--layer-hero-content);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -117,7 +122,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .main {
   position: relative;
-  z-index: 3;
+  z-index: var(--layer-page-overlap);
   padding-bottom: 72px;
 }
 
@@ -285,7 +290,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .sync-status .sync-status__detail {
   position: absolute;
-  z-index: 20;
+  z-index: var(--layer-popover);
   top: calc(100% + 10px);
   right: 0;
   width: max-content;
@@ -426,7 +431,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   position: absolute;
   top: 9px;
   right: 9px;
-  z-index: 3;
+  z-index: var(--layer-local-control);
   display: flex;
   gap: 5px;
   opacity: 0;
@@ -753,7 +758,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
   position: fixed;
   right: 22px;
   bottom: 22px;
-  z-index: 10;
+  z-index: var(--layer-toast);
   max-width: min(380px, calc(100% - 44px));
   padding: 13px 17px;
   color: white;
