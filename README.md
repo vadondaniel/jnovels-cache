@@ -24,6 +24,15 @@ python server.py --open
 The app is available at <http://127.0.0.1:8765>. Keep the terminal window open
 while using it. Stop the server with `Ctrl+C`.
 
+To run without a terminal window, with a tray status icon, double-click
+`run-tray.bat`. The tray menu can open the app, restart the server, or exit.
+Its indicator is green while running, yellow while syncing, orange after a
+sync error, and red when the server is unavailable.
+
+To start the tray app automatically when you sign in to Windows, double-click
+`enable-startup.bat`. Use `disable-startup.bat` to remove that startup entry.
+Neither action requires administrator rights.
+
 To use a different port:
 
 ```powershell
