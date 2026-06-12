@@ -540,6 +540,25 @@ class ParserTests(unittest.TestCase):
             "https://jnovels.com/example-light-novel-epub/",
         )
 
+    def test_ignores_external_legacy_original_post_link(self):
+        parser = server.PostDetailsParser(
+            "https://jnovels.com/example-volume-2-epub/"
+        )
+        parser.feed(
+            """
+            <div class="post-content">
+              <a href="https://mp4directs.com/threads/example.123/">
+                Refer to original post
+              </a>
+              <a href="https://files.example/two">VOLUME 02</a>
+            </div>
+            """
+        )
+
+        details = parser.details()
+
+        self.assertIsNone(details.original_post_url)
+
     def test_preserves_official_and_fan_translation_groups(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-series/")
         parser.feed(GROUPED_SERIES_HTML)
@@ -2979,6 +2998,79 @@ class DatabaseTests(unittest.TestCase):
                 for volume in server.list_series_volumes(canonical_url)
             ],
             [("Volume 1", shared_download)],
+        )
+
+    def test_cleanup_reparents_external_legacy_series_and_removes_excluded_status(self):
+        series_url = "https://jnovels.com/toradora-all-volumes-epub/"
+        child_url = "https://jnovels.com/download-toradora-light-novel-volume-2-epub/"
+        legacy_parent = "https://mp4directs.com/threads/toradora-epub-download.793/"
+        download_url = "https://files.example/toradora-2"
+        server.upsert_books(
+            [
+                server.Book("Toradora all Volumes EPUB", series_url, None, None),
+                server.Book(
+                    "Download Toradora Light Novel Volume 2 EPUB",
+                    child_url,
+                    None,
+                    "2019-01-01",
+                ),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/toradora-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/toradora-1",
+                        0,
+                    ),
+                    server.SeriesVolume("Volume 2", download_url, 1),
+                ],
+            ),
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume',
+                    original_post_url = ?,
+                    download_url = ?
+                WHERE url = ?
+                """,
+                (legacy_parent, download_url, child_url),
+            )
+        server.build_fallback_catalog(legacy_parent)
+        server.replace_series_volumes(
+            "https://jnovels.com/top-light-novels-to-read/",
+            [],
+        )
+
+        server.cleanup_misclassified_series_tracking()
+
+        with server.connect_db() as connection:
+            child = connection.execute(
+                "SELECT original_post_url FROM books WHERE url = ?",
+                (child_url,),
+            ).fetchone()
+            stale_urls = {
+                row["series_url"]
+                for row in connection.execute(
+                    """
+                    SELECT series_url
+                    FROM series_status
+                    WHERE metadata_checked_at IS NULL
+                    """
+                )
+            }
+        self.assertEqual(child["original_post_url"], series_url)
+        self.assertNotIn(legacy_parent, stale_urls)
+        self.assertNotIn(
+            "https://jnovels.com/top-light-novels-to-read/",
+            stale_urls,
         )
 
     def test_known_official_series_applies_group_to_current_source_catalog(self):

@@ -402,7 +402,11 @@ class PostDetailsParser(HTMLParser):
         normalized = text.casefold()
 
         if re.fullmatch(r"refer to (?:the )?(?:original|main) post", normalized):
-            if canonical_page_url(href) != canonical_page_url(self.post_url):
+            parsed_href = urllib.parse.urlparse(href)
+            if (
+                parsed_href.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
+                and canonical_page_url(href) != canonical_page_url(self.post_url)
+            ):
                 self.original_post_url = href
             return
 
@@ -2946,10 +2950,59 @@ def cleanup_misclassified_series_tracking() -> int:
               AND b.original_post_url <> b.url
             """
         ).fetchall()
-    return sum(
+        external_parent_rows = connection.execute(
+            """
+            SELECT DISTINCT b.original_post_url, b.url, b.download_url
+            FROM books AS b
+            WHERE b.entry_type = 'volume'
+              AND b.original_post_url IS NOT NULL
+              AND lower(b.original_post_url) NOT LIKE 'https://jnovels.com/%'
+              AND lower(b.original_post_url) NOT LIKE 'https://www.jnovels.com/%'
+            ORDER BY b.original_post_url, b.id
+            """
+        ).fetchall()
+
+    changes = sum(
         reparent_series_alias(row["series_url"], row["original_post_url"])
         for row in rows
     )
+    handled_external_parents: set[str] = set()
+    for row in external_parent_rows:
+        old_parent = row["original_post_url"]
+        if old_parent in handled_external_parents:
+            continue
+        new_parent = infer_series_parent(
+            row["url"],
+            download_url=row["download_url"],
+        )
+        if not new_parent or not is_cached_series_url(new_parent):
+            continue
+        changes += reparent_series_alias(old_parent, new_parent)
+        handled_external_parents.add(old_parent)
+
+    excluded_urls = [
+        urllib.parse.urljoin(BASE_URL, path)
+        for path in EXCLUDED_SEARCH_PATHS
+    ]
+    with connect_db() as connection:
+        before = connection.total_changes
+        connection.executemany(
+            """
+            DELETE FROM series_status
+            WHERE series_url = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM series_volumes
+                  WHERE series_volumes.series_url = series_status.series_url
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM books
+                  WHERE books.original_post_url = series_status.series_url
+              )
+            """,
+            [(url,) for url in excluded_urls],
+        )
+        changes += connection.total_changes - before
+    return changes
 
 
 def reconcile_series_downloads(series_url: str) -> int:
