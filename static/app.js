@@ -684,7 +684,9 @@ function updateStatus(payload) {
     const detailLines = [];
     const queuedDetails = sync.queued_details || 0;
     const queuedSeries = sync.queued_series || 0;
-    if (sync.phase === "series") {
+    if (sync.phase === "index") {
+      elements.syncStatusLabel.textContent = "Checking series index";
+    } else if (sync.phase === "series") {
       elements.syncStatusLabel.textContent =
         `Updating series ${Math.min(sync.series_completed + 1, sync.series_total)} of ${sync.series_total}`;
       detailLines.push(`${queuedSeries} series remaining`);
@@ -729,10 +731,19 @@ function updateSyncModes(preferredMode = null) {
   const currentMode = preferredMode || elements.syncMode.value;
   const pending = state.health.pending_details || 0;
   const refreshableSeries = state.health.refreshable_series || 0;
+  const indexedSeriesTotal = state.health.indexed_series_total || 0;
+  const missingIndexedSeries = state.health.indexed_series_missing || 0;
+  const seriesIndexLabel = missingIndexedSeries
+    ? `Discover indexed series (${missingIndexedSeries})`
+    : "Check series index";
+  const seriesIndexModes = !indexedSeriesTotal || missingIndexedSeries
+    ? [["series_discovery", seriesIndexLabel]]
+    : [];
   const modes = state.cacheCount
     ? [
         ["catchup", "Check for new entries"],
         ["extend", "Add older entries"],
+        ...seriesIndexModes,
         ...(pending ? [["repair", `Repair incomplete entries (${pending})`]] : []),
         ...(refreshableSeries
           ? [["series_refresh", `Refresh series data (${refreshableSeries})`]]
@@ -741,6 +752,7 @@ function updateSyncModes(preferredMode = null) {
       ]
     : [
         ["catchup", "Build initial cache"],
+        ...seriesIndexModes,
         ["manual", "Scan specific pages"],
       ];
 
@@ -786,6 +798,12 @@ function updateSyncMode() {
     elements.maxPages.max = "2000";
     elements.syncHelp.textContent =
       "Updates stale catalogs and fills missing genres, associated names, and synopses.";
+  } else if (mode === "series_discovery") {
+    elements.maxPagesLabel.textContent = "Series limit";
+    elements.maxPages.value = state.cacheCount ? "50" : "20";
+    elements.maxPages.max = "2000";
+    elements.syncHelp.textContent =
+      "Checks JNovels' series index and caches a bounded batch of series pages missing locally.";
   } else {
     elements.maxPagesLabel.textContent = "Pages to scan";
     elements.maxPages.value = "6";

@@ -19,6 +19,26 @@ SAMPLE_HTML = """
 </article>
 """
 
+SERIES_INDEX_HTML = """
+<article>
+  <div class="post-content clear">
+    <a href="https://ads.example/banner">Advertisement</a>
+    <h3>A</h3>
+    <ol>
+      <li><a href="/alpha-light-novel-epub/">Alpha &amp; Company</a></li>
+      <li><a href="https://jnovels.com/beta-light-novel-epub/?tracking=1">Beta</a></li>
+      <li><a href="https://example.com/not-jnovels/">External</a></li>
+    </ol>
+    <div>
+      <ol>
+        <li><a href="/gamma-light-novel-epub/">Gamma</a></li>
+      </ol>
+    </div>
+  </div>
+  <ol><li><a href="/outside/">Outside content</a></li></ol>
+</article>
+"""
+
 MAIN_POST_HTML = """
 <article>
   <div class="post-content clear">
@@ -241,6 +261,22 @@ METADATA_HTML = """
 
 
 class ParserTests(unittest.TestCase):
+    def test_parses_only_internal_series_index_list_entries(self):
+        parser = server.SeriesIndexParser(server.SERIES_INDEX_URL)
+        parser.feed(SERIES_INDEX_HTML)
+
+        self.assertEqual(
+            [(book.title, book.url) for book in parser.entries],
+            [
+                (
+                    "Alpha & Company",
+                    "https://jnovels.com/alpha-light-novel-epub",
+                ),
+                ("Beta", "https://jnovels.com/beta-light-novel-epub"),
+                ("Gamma", "https://jnovels.com/gamma-light-novel-epub"),
+            ],
+        )
+
     def test_parses_long_volume_title_into_series_and_volume_label(self):
         title = (
             "New Game Plus After Defeating the Last Boss: All These Beautiful, "
@@ -3254,6 +3290,8 @@ class DatabaseTests(unittest.TestCase):
                 "paused_retries": 1,
                 "stale_series": 0,
                 "refreshable_series": 0,
+                "indexed_series_total": 0,
+                "indexed_series_missing": 0,
             },
         )
         failures = server.list_repair_failures()
@@ -3312,6 +3350,8 @@ class DatabaseTests(unittest.TestCase):
                 "paused_retries": 0,
                 "stale_series": 0,
                 "refreshable_series": 0,
+                "indexed_series_total": 0,
+                "indexed_series_missing": 0,
             },
         )
         self.assertEqual(
@@ -3581,6 +3621,126 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(busy, (False, "sync_running", 0))
         self.assertEqual(started, (True, None, 0))
         self.assertEqual(start_sync.call_count, 2)
+
+    def test_series_index_prioritizes_missing_series_related_to_cached_volumes(self):
+        server.store_series_index(
+            [
+                server.Book(
+                    "Unrelated Series",
+                    "https://jnovels.com/unrelated-light-novel-epub/",
+                    None,
+                    None,
+                ),
+                server.Book(
+                    "Related Series",
+                    "https://jnovels.com/related-series-light-novel-epub/",
+                    None,
+                    None,
+                ),
+            ]
+        )
+        server.upsert_books(
+            [
+                server.Book(
+                    "Related Series Volume 2 Epub",
+                    "https://jnovels.com/related-series-volume-2-epub/",
+                    None,
+                    "2026-06-01",
+                )
+            ]
+        )
+
+        candidates = server.get_series_index_candidates(1)
+
+        self.assertEqual(
+            [book.url for book in candidates],
+            ["https://jnovels.com/related-series-light-novel-epub"],
+        )
+
+    def test_series_discovery_is_bounded_for_an_empty_cache(self):
+        entries = [
+            server.Book(
+                title,
+                f"https://jnovels.com/{title.casefold()}-light-novel-epub/",
+                None,
+                None,
+            )
+            for title in ("Alpha", "Beta", "Gamma")
+        ]
+        details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/v1",
+            [server.SeriesVolume("Volume 1", "https://files.example/v1", 0)],
+        )
+
+        with (
+            patch.object(server, "fetch_series_index", return_value=entries),
+            patch.object(
+                server,
+                "fetch_post_details",
+                return_value=details,
+            ) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 2, 0.5, "series_discovery")
+
+        self.assertEqual(fetch_details.call_count, 2)
+        self.assertEqual(server.count_books("", "all"), 2)
+        self.assertEqual(server.count_missing_series_index_entries(), 1)
+        self.assertIn("Checked 3 indexed series", server.sync_state["notice"])
+
+    def test_normal_sync_uses_existing_index_snapshot_in_small_batches(self):
+        known_url = "https://jnovels.com/known-light-novel-epub/"
+        indexed_url = "https://jnovels.com/indexed-light-novel-epub/"
+        server.upsert_books(
+            [server.Book("Known", known_url, None, "2026-06-01")]
+        )
+        complete_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/known",
+            [server.SeriesVolume("Volume 1", "https://files.example/known", 0)],
+        )
+        server.update_book_details(known_url, complete_details)
+        server.store_series_index(
+            [
+                server.Book("Known", known_url, None, None),
+                server.Book("Indexed", indexed_url, None, None),
+            ]
+        )
+        indexed_details = server.PostDetails(
+            "series",
+            None,
+            "https://files.example/indexed",
+            [
+                server.SeriesVolume(
+                    "Volume 1",
+                    "https://files.example/indexed",
+                    0,
+                )
+            ],
+        )
+
+        with (
+            patch.object(
+                server,
+                "fetch_page",
+                return_value=[server.Book("Known", known_url, None, "2026-06-01")],
+            ),
+            patch.object(server, "fetch_series_index") as fetch_index,
+            patch.object(
+                server,
+                "fetch_post_details",
+                return_value=indexed_details,
+            ) as fetch_details,
+            patch.object(server.time, "sleep"),
+        ):
+            server.run_sync(1, 20, 0.5, "catchup")
+
+        fetch_index.assert_not_called()
+        fetch_details.assert_called_once_with(indexed_url.rstrip("/"))
+        self.assertEqual(server.count_missing_series_index_entries(), 0)
 
     def test_new_volume_refreshes_original_series_catalog(self):
         volume_url = "https://jnovels.com/example-volume-3-epub/"

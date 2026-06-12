@@ -38,6 +38,7 @@ Open **Sync cache** and choose the mode that matches what you need:
 | --- | --- |
 | **Check for new entries** | Add recent posts, stopping when cached results are reached. |
 | **Add older entries** | Continue building the cache from older search pages. |
+| **Discover indexed series** | Add a limited batch of series pages missing from the local cache. |
 | **Repair missing details** | Retry entries missing download links, series links, or catalogs. |
 | **Refresh series data** | Update catalogs and fill missing genres, associated names, and synopses. |
 | **Scan a page range** | Rescan specific JNovels search pages. |

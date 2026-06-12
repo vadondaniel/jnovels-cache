@@ -32,13 +32,17 @@ MAX_PAGE_SIZE = 100
 AUTO_REPAIR_LIMIT = 20
 AUTO_REPAIR_MAX_ATTEMPTS = 3
 AUTO_SERIES_REFRESH_LIMIT = 5
+AUTO_SERIES_INDEX_LIMIT = 3
 AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
 SERIES_STALE_DAYS = 30
+SERIES_INDEX_REFRESH_HOURS = 24
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
 SERIES_METADATA_PARSER_VERSION = "5"
+SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
+SERIES_INDEX_REFRESH_KEY = "series_index_last_checked_at"
 EXCLUDED_SEARCH_PATHS = {
     "/light-novel-epub-jp/",
     "/top-light-novels-to-read/",
@@ -104,6 +108,69 @@ class SeriesVolume:
     position: int
     release_group: str | None = None
     source_list: int = field(default=0, compare=False, repr=False)
+
+
+class SeriesIndexParser(HTMLParser):
+    def __init__(self, page_url: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.page_url = page_url
+        self.entries: list[Book] = []
+        self._content_depth = 0
+        self._list_depth = 0
+        self._anchor_href: str | None = None
+        self._anchor_parts: list[str] = []
+        self._seen_urls: set[str] = set()
+
+    def handle_starttag(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "div":
+            if self._content_depth:
+                self._content_depth += 1
+            elif "post-content" in classes:
+                self._content_depth = 1
+            return
+        if not self._content_depth:
+            return
+        if tag == "ol":
+            self._list_depth += 1
+        elif tag == "a" and self._list_depth:
+            self._anchor_href = attributes.get("href")
+            self._anchor_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._anchor_href:
+            self._finish_anchor()
+            self._anchor_href = None
+            self._anchor_parts = []
+        elif tag == "ol" and self._list_depth:
+            self._list_depth -= 1
+        elif tag == "div" and self._content_depth:
+            self._content_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._anchor_href:
+            self._anchor_parts.append(data)
+
+    def _finish_anchor(self) -> None:
+        title = " ".join("".join(self._anchor_parts).split())
+        url = canonical_page_url(
+            urllib.parse.urljoin(self.page_url, self._anchor_href or "")
+        )
+        parsed = urllib.parse.urlsplit(url)
+        if (
+            not title
+            or parsed.netloc.casefold() not in {"jnovels.com", "www.jnovels.com"}
+            or parsed.path == urllib.parse.urlsplit(SERIES_INDEX_URL).path
+            or url in self._seen_urls
+        ):
+            return
+        self._seen_urls.add(url)
+        self.entries.append(Book(title, url, None, None))
 
 
 class PostDetailsParser(HTMLParser):
@@ -1369,6 +1436,14 @@ def initialize_db() -> None:
                 hidden INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS series_index_entries (
+                url TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1
+            );
             """
         )
         existing_columns = {
@@ -1701,6 +1776,194 @@ def fetch_page(page: int, timeout: int = 30) -> list[Book]:
     parser = SearchResultsParser()
     parser.feed(body)
     return parser.books
+
+
+def fetch_series_index(timeout: int = 30) -> list[Book]:
+    request = urllib.request.Request(
+        SERIES_INDEX_URL,
+        headers={
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.8",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        charset = response.headers.get_content_charset() or "utf-8"
+        body = response.read().decode(charset, errors="replace")
+    parser = SeriesIndexParser(SERIES_INDEX_URL)
+    parser.feed(body)
+    if not parser.entries:
+        raise ValueError("The JNovels series index did not contain any entries.")
+    return parser.entries
+
+
+def store_series_index(entries: list[Book]) -> tuple[int, int]:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    canonical_entries = {
+        canonical_page_url(entry.url): entry.title
+        for entry in entries
+        if entry.title and entry.url
+    }
+    if not canonical_entries:
+        raise ValueError("The JNovels series index did not contain any entries.")
+    with connect_db() as connection:
+        existing_urls = {
+            row["url"]
+            for row in connection.execute(
+                "SELECT url FROM series_index_entries"
+            ).fetchall()
+        }
+        connection.execute("UPDATE series_index_entries SET active = 0")
+        connection.executemany(
+            """
+            INSERT INTO series_index_entries (
+                url, title, first_seen_at, last_seen_at, active
+            )
+            VALUES (?, ?, ?, ?, 1)
+            ON CONFLICT(url) DO UPDATE SET
+                title = excluded.title,
+                last_seen_at = excluded.last_seen_at,
+                active = 1
+            """,
+            [
+                (url, title, now, now)
+                for url, title in canonical_entries.items()
+            ],
+        )
+        connection.execute(
+            """
+            INSERT INTO metadata (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (SERIES_INDEX_REFRESH_KEY, now),
+        )
+    return len(canonical_entries), len(set(canonical_entries) - existing_urls)
+
+
+def series_index_is_initialized() -> bool:
+    with connect_db() as connection:
+        return connection.execute(
+            "SELECT 1 FROM series_index_entries LIMIT 1"
+        ).fetchone() is not None
+
+
+def series_index_refresh_due() -> bool:
+    raw = get_metadata().get(SERIES_INDEX_REFRESH_KEY)
+    if not raw:
+        return True
+    try:
+        checked_at = datetime.fromisoformat(raw)
+    except ValueError:
+        return True
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=timezone.utc)
+    return checked_at <= datetime.now(timezone.utc) - timedelta(
+        hours=SERIES_INDEX_REFRESH_HOURS
+    )
+
+
+def get_series_index_candidates(limit: int) -> list[Book]:
+    if limit <= 0:
+        return []
+    with connect_db() as connection:
+        index_rows = connection.execute(
+            """
+            SELECT title, url, first_seen_at
+            FROM series_index_entries
+            WHERE active = 1
+            """
+        ).fetchall()
+        book_rows = connection.execute(
+            "SELECT title, url, original_post_url FROM books"
+        ).fetchall()
+        volume_series_urls = {
+            canonical_page_url(row["series_url"])
+            for row in connection.execute(
+                "SELECT DISTINCT series_url FROM series_volumes"
+            ).fetchall()
+        }
+
+    cached_urls = volume_series_urls
+    cached_identity_keys: set[str] = set()
+    for row in book_rows:
+        cached_urls.add(canonical_page_url(row["url"]))
+        if row["original_post_url"]:
+            cached_urls.add(canonical_page_url(row["original_post_url"]))
+        key = series_identity_key(row["title"], row["url"])
+        if key:
+            cached_identity_keys.add(key)
+
+    candidates = [
+        (
+            series_identity_key(row["title"], row["url"]) in cached_identity_keys,
+            row["first_seen_at"],
+            row["title"].casefold(),
+            Book(row["title"], row["url"], None, None),
+        )
+        for row in index_rows
+        if canonical_page_url(row["url"]) not in cached_urls
+    ]
+    candidates.sort(key=lambda item: item[2])
+    candidates.sort(key=lambda item: item[1], reverse=True)
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [item[3] for item in candidates[:limit]]
+
+
+def count_missing_series_index_entries(
+    *,
+    connection: sqlite3.Connection | None = None,
+) -> int:
+    def count(active_connection: sqlite3.Connection) -> int:
+        cached_urls = {
+            canonical_page_url(row["url"])
+            for row in active_connection.execute("SELECT url FROM books")
+        }
+        cached_urls.update(
+            canonical_page_url(row["original_post_url"])
+            for row in active_connection.execute(
+                """
+                SELECT DISTINCT original_post_url
+                FROM books
+                WHERE original_post_url IS NOT NULL
+                """
+            )
+        )
+        cached_urls.update(
+            canonical_page_url(row["series_url"])
+            for row in active_connection.execute(
+                "SELECT DISTINCT series_url FROM series_volumes"
+            )
+        )
+        return sum(
+            canonical_page_url(row["url"]) not in cached_urls
+            for row in active_connection.execute(
+                "SELECT url FROM series_index_entries WHERE active = 1"
+            )
+        )
+
+    if connection is not None:
+        return count(connection)
+    with connect_db() as active_connection:
+        return count(active_connection)
+
+
+def add_series_index_candidates(books: list[Book]) -> list[str]:
+    if not books:
+        return []
+    upsert_books(books)
+    urls = [canonical_page_url(book.url) for book in books]
+    placeholders = ", ".join("?" for _ in urls)
+    with connect_db() as connection:
+        connection.execute(
+            f"""
+            UPDATE books
+            SET entry_type = 'series'
+            WHERE url IN ({placeholders})
+              AND detail_cached_at IS NULL
+            """,
+            urls,
+        )
+    return urls
 
 
 def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
@@ -2809,6 +3072,12 @@ def get_cache_health(
             "paused_retries": paused,
             "stale_series": stale_series,
             "refreshable_series": refreshable_series,
+            "indexed_series_total": active_connection.execute(
+                "SELECT COUNT(*) FROM series_index_entries WHERE active = 1"
+            ).fetchone()[0],
+            "indexed_series_missing": count_missing_series_index_entries(
+                connection=active_connection
+            ),
         }
 
     if connection is not None:
@@ -3288,6 +3557,7 @@ def run_sync(
         return
 
     initial_cache_signature: str | None = None
+    completion_notice: str | None = None
     try:
         set_sync_started(start_page, max_pages, delay, mode)
         initial_cache_signature = cache_content_signature()
@@ -3319,6 +3589,21 @@ def run_sync(
         elif mode == "repair":
             books: list[Book] = []
             detail_urls = get_incomplete_detail_urls(max_pages)
+        elif mode == "series_discovery":
+            books = []
+            sync_state["phase"] = "index"
+            sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            index_entries = fetch_series_index()
+            index_total, index_new = store_series_index(index_entries)
+            detail_urls = add_series_index_candidates(
+                get_series_index_candidates(max_pages)
+            )
+            completion_notice = (
+                f"Checked {index_total} indexed series"
+                + (f"; {index_new} new to the index." if index_new else ".")
+            )
         else:
             known_urls = get_cached_urls()
             scan_frontier = get_search_scan_frontier()
@@ -3373,6 +3658,22 @@ def run_sync(
                 )
             )
             scheduled_series_urls.update(get_series_refresh_urls(AUTO_SERIES_REFRESH_LIMIT))
+            if series_index_is_initialized():
+                if series_index_refresh_due():
+                    try:
+                        store_series_index(fetch_series_index())
+                    except (
+                        urllib.error.URLError,
+                        TimeoutError,
+                        OSError,
+                        ValueError,
+                    ):
+                        pass
+                index_candidates = get_series_index_candidates(
+                    AUTO_SERIES_INDEX_LIMIT
+                )
+                detail_urls.extend(add_series_index_candidates(index_candidates))
+                detail_urls = list(dict.fromkeys(detail_urls))
         sync_state["phase"] = "details"
         sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
             timespec="seconds"
@@ -3481,6 +3782,8 @@ def run_sync(
                     "Reached the end of JNovels search results "
                     f"at page {sync_state['search_end_page']}."
                 )
+            elif completion_notice:
+                sync_state["notice"] = completion_notice
             set_metadata("last_sync_at", finished)
             set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
             set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
@@ -4169,10 +4472,15 @@ class AppHandler(SimpleHTTPRequestHandler):
                 "manual",
                 "repair",
                 "series_refresh",
+                "series_discovery",
             }:
                 raise ValueError("Unknown sync mode")
             start_page = min(max(int(payload.get("start_page", 1)), 1), 10000)
-            max_limit = 2000 if mode in {"repair", "series_refresh"} else 200
+            max_limit = (
+                2000
+                if mode in {"repair", "series_refresh", "series_discovery"}
+                else 200
+            )
             max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
             delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
             automatic = payload.get("automatic") is True
