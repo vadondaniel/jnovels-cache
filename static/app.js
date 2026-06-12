@@ -15,6 +15,7 @@ const state = {
 };
 
 const defaultSort = "published_desc";
+const searchDebounceMs = 400;
 const validSorts = new Set(["published_desc", "published_asc", "title_asc", "title_desc", "cached_desc"]);
 const validFilters = new Set(["all", "series", "volumes", "pending", "favorites", "hidden"]);
 
@@ -992,7 +993,7 @@ elements.search.addEventListener("input", () => {
   updateSourceSearchLink();
   state.searchTimer = setTimeout(
     () => loadBooks({ historyMode: "replace" }).catch((error) => showToast(error.message, true)),
-    160,
+    searchDebounceMs,
   );
 });
 
