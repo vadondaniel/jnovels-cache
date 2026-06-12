@@ -1,39 +1,27 @@
 # JNovels Cache
 
 A local web app for browsing cached JNovels EPUB posts and series catalogs.
-It stores metadata and links only; it does not download EPUB files or cover
-images.
+It stores metadata and links, not EPUB files.
 
 ## Requirements
 
 - Python 3.10 or newer
 - Internet access while syncing
 
-No third-party Python packages are required.
-
 ## Start
 
 On Windows, double-click `run.bat`.
 
-Alternatively, run:
+For a tray icon with controls to open the app, restart the server, configure
+Windows startup, or exit, use `run-tray.bat`.
+
+Or start it from a terminal:
 
 ```powershell
 python server.py --open
 ```
 
-The app is available at <http://127.0.0.1:8765>. Keep the terminal window open
-while using it. Stop the server with `Ctrl+C`.
-
-To run without a terminal window, with a tray status icon, double-click
-`run-tray.bat`. It runs without a console window. The tray menu can open the
-app, restart the server, toggle **Start with Windows**, or exit.
-Its indicator is green while running, yellow while syncing, orange after a
-sync error, and red when the server is unavailable.
-
-To start the tray app automatically when you sign in to Windows, double-click
-`enable-startup.bat`. Use `disable-startup.bat` to remove that startup entry.
-Both commands run without leaving a console window open.
-Neither action requires administrator rights.
+The app is available at <http://127.0.0.1:8765>.
 
 To use a different port:
 
@@ -54,32 +42,15 @@ Open **Sync cache** and choose the mode that matches what you need:
 | **Refresh series data** | Update catalogs and fill missing genres, associated names, and synopses. |
 | **Scan a page range** | Rescan specific JNovels search pages. |
 
-Syncing can take time because pages are requested sequentially. Existing
-entries are updated rather than duplicated.
-
-If the server stops during a sync, saved work is resumed the next time it
-starts. Run the same sync again if the interrupted search did not reach all
-intended pages.
-
-## Browse
-
-- Search cached titles from the main search field.
-- Use **Series**, **Volumes**, and **Pending** to filter results.
-- Use the page control to jump directly to a result page.
-- **Download** opens the cached external EPUB download link.
-- **Volumes** opens the cached downloads for a series.
-- **Series page** and **Entry page** open the relevant JNovels pages.
-
-The pending or stale status indicator opens repair options and individual
-failure details.
+Completed work is saved throughout a sync. If the server is interrupted, it
+recovers that progress when restarted.
 
 ## Local Data
 
-All cached data is stored in `jnovels_cache.db` beside `server.py`.
+Cached data is stored in `jnovels_cache.db`.
 
-- Back up the cache by copying `jnovels_cache.db` while the server is stopped.
-- Reset the cache by stopping the server and deleting `jnovels_cache.db`.
-  A new empty database is created on the next start.
+- To back up the cache, stop the app and copy `jnovels_cache.db`.
+- To reset the cache, stop the app and delete `jnovels_cache.db`.
 
 ## Troubleshooting
 
@@ -106,9 +77,3 @@ python server.py --port 9000 --open
 Open the cache health indicator and retry the entry, or run **Repair missing
 details**. Use **Refresh series data** when a catalog or its descriptive
 information is missing.
-
-## Tests
-
-```powershell
-python -m pytest -q
-```
