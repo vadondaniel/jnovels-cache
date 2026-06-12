@@ -2656,23 +2656,26 @@ def reconcile_series_downloads(series_url: str) -> int:
             """,
             (series_url,),
         ).fetchall()
-        downloads_by_label = {
-            row["label"].casefold(): row["download_url"] for row in volume_rows
-        }
-        unresolved = connection.execute(
+        downloads_by_label: dict[str, str | None] = {}
+        for row in volume_rows:
+            label_key = row["label"].casefold()
+            if label_key in downloads_by_label:
+                downloads_by_label[label_key] = None
+            else:
+                downloads_by_label[label_key] = row["download_url"]
+        children = connection.execute(
             """
-            SELECT url, title
+            SELECT url, title, download_url
             FROM books
             WHERE original_post_url = ?
-              AND download_url IS NULL
             """,
             (series_url,),
         ).fetchall()
         updates = []
-        for row in unresolved:
+        for row in children:
             label = extract_catalog_label(row["title"])
             download_url = downloads_by_label.get((label or "").casefold())
-            if download_url:
+            if download_url and download_url != row["download_url"]:
                 updates.append((download_url, now, now, row["url"]))
         connection.executemany(
             """

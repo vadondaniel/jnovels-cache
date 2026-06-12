@@ -1197,6 +1197,96 @@ class DatabaseTests(unittest.TestCase):
             [("Volume 1", 0), ("Volume 2", 1)],
         )
 
+    def test_series_refresh_updates_child_when_catalog_download_changes(self):
+        series_url = "https://jnovels.com/example-series/"
+        child_url = "https://jnovels.com/example-series-volume-2/"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 2 EPUB", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/old-v2",
+            ),
+        )
+
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/v1",
+                        0,
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/new-v2",
+                        1,
+                    ),
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+        self.assertEqual(
+            saved[child_url]["download_url"],
+            "https://files.example/new-v2",
+        )
+
+    def test_series_refresh_does_not_guess_between_duplicate_group_labels(self):
+        series_url = "https://jnovels.com/example-series/"
+        child_url = "https://jnovels.com/example-series-volume-1/"
+        old_download = "https://files.example/old-v1"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 1 EPUB", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails("volume", series_url, old_download),
+        )
+
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/official-v1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/official-v1",
+                        0,
+                        "Official translation",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/fan-v1",
+                        1,
+                        "Fan translation",
+                    ),
+                ],
+            ),
+        )
+
+        saved = {
+            book["url"]: book for book in server.list_books("", "title_asc")
+        }
+        self.assertEqual(saved[child_url]["download_url"], old_download)
+
     def test_card_catalog_count_uses_current_download_category(self):
         series_url = "https://jnovels.com/example-series/"
         child_url = "https://jnovels.com/example-series-volume-2/"
