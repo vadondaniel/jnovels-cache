@@ -95,14 +95,14 @@
     </nav>
   </main>
 
-  <dialog id="sync-dialog" class="sync-dialog">
-    <header class="sync-dialog__header">
+  <dialog id="sync-dialog" class="modal sync-dialog">
+    <header class="modal__header sync-dialog__header">
       <div>
-        <p class="eyebrow">Cache update</p>
-        <h2>Sync cache</h2>
-        <p>Choose which JNovels search pages to check.</p>
+        <p class="eyebrow modal__eyebrow">Cache update</p>
+        <h2 class="modal__title">Sync cache</h2>
+        <p class="modal__summary">Choose which JNovels search pages to check.</p>
       </div>
-      <button id="sync-close" class="sync-dialog__close" type="button" aria-label="Close sync options">×</button>
+      <button id="sync-close" class="icon-button modal__close" type="button" aria-label="Close sync options">×</button>
     </header>
 
     <form id="sync-form" class="sync-dialog__form">
@@ -141,14 +141,14 @@
     </form>
   </dialog>
 
-  <dialog id="repair-dialog" class="repair-dialog">
-    <header class="repair-dialog__header">
+  <dialog id="repair-dialog" class="modal repair-dialog">
+    <header class="modal__header repair-dialog__header">
       <div>
-        <p class="eyebrow">Cache health</p>
-        <h2>Incomplete details</h2>
-        <p id="repair-summary">Loading repair status...</p>
+        <p class="eyebrow modal__eyebrow">Cache health</p>
+        <h2 class="modal__title">Incomplete details</h2>
+        <p id="repair-summary" class="modal__summary">Loading repair status...</p>
       </div>
-      <button id="repair-close" class="repair-dialog__close" type="button" aria-label="Close repair status">×</button>
+      <button id="repair-close" class="icon-button modal__close" type="button" aria-label="Close repair status">×</button>
     </header>
     <div id="repair-list" class="repair-dialog__list"></div>
     <footer class="repair-dialog__footer">
@@ -196,14 +196,14 @@
     </article>
   </template>
 
-  <dialog id="catalog-dialog" class="catalog-dialog">
-    <div class="catalog-dialog__header">
+  <dialog id="catalog-dialog" class="modal catalog-dialog">
+    <div class="modal__header catalog-dialog__header">
       <div>
-        <p id="catalog-eyebrow" class="eyebrow">Cached volumes</p>
-        <h2 id="catalog-title">Series</h2>
-        <p id="catalog-count"></p>
+        <p id="catalog-eyebrow" class="eyebrow modal__eyebrow">Cached volumes</p>
+        <h2 id="catalog-title" class="modal__title">Series</h2>
+        <p id="catalog-count" class="modal__summary"></p>
       </div>
-      <button id="catalog-close" class="catalog-dialog__close" type="button" aria-label="Close volumes">×</button>
+      <button id="catalog-close" class="icon-button modal__close" type="button" aria-label="Close volumes">×</button>
     </div>
     <div class="catalog-dialog__content">
       <details id="catalog-details" class="catalog-dialog__details">
@@ -217,13 +217,13 @@
     </div>
   </dialog>
 
-  <dialog id="details-dialog" class="details-dialog">
-    <header class="details-dialog__header">
+  <dialog id="details-dialog" class="modal details-dialog">
+    <header class="modal__header details-dialog__header">
       <div>
-        <p class="eyebrow">About this series</p>
-        <h2 id="details-title">Series</h2>
+        <p class="eyebrow modal__eyebrow">About this series</p>
+        <h2 id="details-title" class="modal__title">Series</h2>
       </div>
-      <button id="details-close" class="details-dialog__close" type="button" aria-label="Close series details">×</button>
+      <button id="details-close" class="icon-button modal__close" type="button" aria-label="Close series details">×</button>
     </header>
     <div class="details-dialog__body">
       <section id="details-genres-section">
