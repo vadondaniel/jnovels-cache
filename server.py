@@ -1448,7 +1448,8 @@ def get_catalog_indexes() -> tuple[
                b.title
                 FROM series_volumes AS sv
                 JOIN (
-                    SELECT series_url, COUNT(*) AS volume_count
+                    SELECT series_url,
+                           SUM(NOT is_internal_jnovels_url(download_url)) AS volume_count
                     FROM series_volumes
                     GROUP BY series_url
                 ) AS counts ON counts.series_url = sv.series_url
@@ -1512,6 +1513,7 @@ def get_download_catalog_index() -> dict[str, tuple[str, int]]:
 def connect_db() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
+    connection.create_function("is_internal_jnovels_url", 1, is_internal_jnovels_url)
     connection.execute("PRAGMA busy_timeout = 30000")
     try:
         yield connection

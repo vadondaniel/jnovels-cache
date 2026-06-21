@@ -3845,6 +3845,33 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertTrue(server.list_books("", "title_asc")[0]["is_standalone"])
 
+    def test_related_catalog_links_do_not_inflate_primary_volume_count(self):
+        series_url = "https://jnovels.com/example-series/"
+        server.upsert_books(
+            [server.Book("Example Series", series_url, None, None)]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                    server.SeriesVolume(
+                        "Example EX",
+                        "https://jnovels.com/example-ex/",
+                        2,
+                    ),
+                ],
+            ),
+        )
+
+        saved = server.list_books("", "title_asc")[0]
+        self.assertEqual(saved["volume_count"], 2)
+        self.assertEqual(len(server.list_series_volumes(series_url)), 3)
+
     def test_series_refresh_reconciles_unresolved_child_download(self):
         series_url = "https://example/series"
         volume = server.Book(
