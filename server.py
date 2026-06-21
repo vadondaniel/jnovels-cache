@@ -743,6 +743,10 @@ def is_internal_jnovels_url(value: str | None) -> bool:
     )
 
 
+def is_counted_catalog_volume(label: str, download_url: str) -> bool:
+    return not is_internal_jnovels_url(download_url)
+
+
 def is_volume_label(value: str) -> bool:
     return extract_volume_label(value) is not None
 
@@ -865,7 +869,21 @@ def extract_named_release_label(value: str) -> str | None:
 
 
 def extract_catalog_label(value: str) -> str | None:
-    return extract_volume_label(value) or extract_named_release_label(value)
+    revised = re.search(
+        r"\bVolumes?\s+([0-9]+(?:\.[0-9]+)?)\s*(?:&|and)\s*"
+        r"([0-9]+(?:\.[0-9]+)?).*?Revised Editions?\b",
+        value,
+        re.IGNORECASE,
+    )
+    if revised:
+        return f"Volume {normalize_volume_number(revised.group(1))}"
+    label = extract_volume_label(value)
+    if label:
+        return label
+    legacy = re.search(r"\s([0-9]+(?:\.[0-9]+)?)_\s*\S", value)
+    if legacy:
+        return f"Volume {normalize_volume_number(legacy.group(1))}"
+    return extract_named_release_label(value)
 
 
 def extract_trailing_catalog_label(value: str) -> str | None:
@@ -1229,6 +1247,11 @@ def series_identity_key(title: str | None, url: str) -> str:
     return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
 
 
+def virtual_series_url(identity_key: str) -> str:
+    slug = "-".join(re.findall(r"[a-z0-9]+", identity_key.casefold()))
+    return f"virtual://jnovels/{slug}"
+
+
 def book_page_format(title: str, url: str) -> str | None:
     value = f"{title} {urllib.parse.urlparse(url).path}".casefold()
     has_pdf = bool(
@@ -1298,6 +1321,23 @@ def is_distinct_subseries_title(parent_title: str, candidate_title: str) -> bool
         parent_title,
         candidate_title,
     ) or is_named_subseries_title(parent_title, candidate_title)
+
+
+def are_sibling_named_subseries(first: str, second: str) -> bool:
+    first_words = first.split()
+    second_words = second.split()
+    common_words = []
+    for first_word, second_word in zip(first_words, second_words):
+        if first_word != second_word:
+            break
+        common_words.append(first_word)
+    if len(common_words) < 2:
+        return False
+    parent = " ".join(common_words)
+    return is_named_subseries_title(parent, first) and is_named_subseries_title(
+        parent,
+        second,
+    )
 
 
 def qualify_numbered_subseries_badge(
@@ -1449,7 +1489,7 @@ def get_catalog_indexes() -> tuple[
                 FROM series_volumes AS sv
                 JOIN (
                     SELECT series_url,
-                           SUM(NOT is_internal_jnovels_url(download_url)) AS volume_count
+                           SUM(is_counted_catalog_volume(label, download_url)) AS volume_count
                     FROM series_volumes
                     GROUP BY series_url
                 ) AS counts ON counts.series_url = sv.series_url
@@ -1473,18 +1513,20 @@ def get_catalog_indexes() -> tuple[
                 row["series_url"],
                 (row["release_group"] or "").casefold(),
             )
-            category_labels.setdefault(category_key, set()).add(
-                row["label"].casefold()
-            )
+            if not is_internal_jnovels_url(row["download_url"]):
+                category_labels.setdefault(category_key, set()).add(
+                    row["label"].casefold()
+                )
 
         download_category_counts = {
             row["download_url"]: len(
-                category_labels[
+                category_labels.get(
                     (
                         row["series_url"],
                         (row["release_group"] or "").casefold(),
-                    )
-                ]
+                    ),
+                    set(),
+                )
             )
             for row in rows
         }
@@ -1514,6 +1556,11 @@ def connect_db() -> Iterator[sqlite3.Connection]:
     connection = sqlite3.connect(DB_PATH, timeout=30)
     connection.row_factory = sqlite3.Row
     connection.create_function("is_internal_jnovels_url", 1, is_internal_jnovels_url)
+    connection.create_function(
+        "is_counted_catalog_volume",
+        2,
+        is_counted_catalog_volume,
+    )
     connection.execute("PRAGMA busy_timeout = 30000")
     try:
         yield connection
@@ -3053,29 +3100,71 @@ def resequence_series_volumes(series_url: str) -> None:
     with connect_db() as connection:
         rows = connection.execute(
             """
-            SELECT id, label, position, release_group
-            FROM series_volumes
-            WHERE series_url = ?
+            SELECT sv.id, sv.label, sv.position, sv.release_group,
+                   EXISTS (
+                       SELECT 1 FROM books AS child
+                       WHERE child.download_url = sv.download_url
+                         AND (child.url = sv.series_url OR child.original_post_url = sv.series_url)
+                   ) AS has_post
+            FROM series_volumes AS sv
+            WHERE sv.series_url = ?
             ORDER BY position, id
             """,
             (series_url,),
         ).fetchall()
+        retained: dict[tuple[str, str], sqlite3.Row] = {}
+        normalized_labels: dict[int, str] = {}
+        discarded: set[int] = set()
+        for row in rows:
+            legacy = re.search(r"\s([0-9]+(?:\.[0-9]+)?)_\s*\S", row["label"])
+            label = (
+                f"Volume {normalize_volume_number(legacy.group(1))}"
+                if legacy
+                else row["label"]
+            )
+            normalized_labels[row["id"]] = label
+            key = ((row["release_group"] or "").casefold(), label.casefold())
+            existing = retained.get(key)
+            if existing is None or row["has_post"] > existing["has_post"]:
+                if existing is not None:
+                    discarded.add(existing["id"])
+                retained[key] = row
+            else:
+                discarded.add(row["id"])
+        if discarded:
+            connection.executemany(
+                "DELETE FROM series_volumes WHERE id = ?",
+                [(row_id,) for row_id in discarded],
+            )
+        connection.executemany(
+            "UPDATE series_volumes SET label = ? WHERE id = ?",
+            [
+                (normalized_labels[row["id"]], row["id"])
+                for row in retained.values()
+                if normalized_labels[row["id"]] != row["label"]
+            ],
+        )
+        rows = list(retained.values())
         group_order: dict[str, int] = {}
         for row in rows:
             group_key = (row["release_group"] or "").casefold()
             group_order.setdefault(group_key, len(group_order))
 
-        def volume_order(row: sqlite3.Row) -> tuple[int, int, float, int]:
+        def volume_order(row: sqlite3.Row) -> tuple[int, int, float, int, int]:
             group_key = (row["release_group"] or "").casefold()
+            label = normalized_labels[row["id"]]
+            year = re.search(r"\bYear\s+([0-9]+)\b", label, re.IGNORECASE)
             match = re.search(
                 r"\b(?:Volume|Vol\.|Part)\s+([0-9]+(?:\.[0-9]+)?)",
-                row["label"],
+                label,
                 re.IGNORECASE,
             )
+            number = match
             return (
                 group_order[group_key],
-                int(match is None),
-                float(match.group(1)) if match else float("inf"),
+                int(year.group(1)) if year else 1,
+                int(number is None),
+                float(number.group(1)) if number else float("inf"),
                 row["position"],
             )
 
@@ -3342,6 +3431,7 @@ def merge_overlapping_catalog_aliases(series_url: str | None = None) -> int:
 
 def split_conflated_subseries_catalogs() -> int:
     """Restore independent catalog pages absorbed by loose title-prefix matching."""
+    changes = 0
     with connect_db() as connection:
         rows = connection.execute(
             """
@@ -3375,23 +3465,21 @@ def split_conflated_subseries_catalogs() -> int:
         parent_title = family[0]["parent_title"]
         if not is_named_subseries_title(parent_title, family[0]["title"]):
             continue
+        virtual_url = virtual_series_url(family_key[1])
+        with connect_db() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                "UPDATE books SET original_post_url = ? WHERE url = ?",
+                [(virtual_url, row["url"]) for row in family],
+            )
+            connection.executemany(
+                "DELETE FROM series_volumes WHERE series_url = ? AND download_url = ?",
+                [(family_key[0], row["download_url"]) for row in family],
+            )
+            changes += connection.total_changes - before
+        build_fallback_catalog(virtual_url)
+        build_fallback_catalog(family_key[0])
 
-        def family_release_number(row: sqlite3.Row) -> float:
-            label = extract_catalog_label(row["title"])
-            match = re.search(r"[0-9]+(?:\.[0-9]+)?", label or "")
-            return float(match.group(0)) if match else float("inf")
-
-        candidates[family_key] = min(
-            family,
-            key=lambda row: (
-                family_release_number(row),
-                row["published_at"] is None,
-                row["published_at"] or "",
-                row["url"],
-            ),
-        )
-
-    changes = 0
     for family_key, candidate in candidates.items():
         family = families[family_key]
         labeled = [
@@ -4823,6 +4911,9 @@ def list_books(
         volume_counts,
         download_category_counts,
     ) = get_catalog_indexes()
+    catalog_keys_by_url: dict[str, set[str]] = {}
+    for catalog_key, (catalog_url, _) in catalog_index.items():
+        catalog_keys_by_url.setdefault(catalog_url, set()).add(catalog_key)
 
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
@@ -4853,6 +4944,8 @@ def list_books(
             book["title"],
             volume_label,
         )
+        if book["entry_type"] == "series":
+            volume_label = None
         series_url = (
             book["original_post_url"]
             if book["entry_type"] == "volume"
@@ -4860,10 +4953,19 @@ def list_books(
         )
         catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
         download_catalog = download_catalog_index.get(book["download_url"] or "")
+        book_key = series_identity_key(book["title"], book["url"])
+        conflicting_subseries = bool(
+            download_catalog
+            and any(
+                are_sibling_named_subseries(book_key, candidate_key)
+                for candidate_key in catalog_keys_by_url.get(download_catalog[0], set())
+            )
+        )
         may_infer_catalog = not series_url or volume_counts.get(series_url, 0) <= 1
         if (
             may_infer_catalog
             and download_catalog
+            and not conflicting_subseries
             and download_catalog[1] > volume_counts.get(series_url or "", 0)
         ):
             series_url = download_catalog[0]
@@ -4928,18 +5030,19 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         series_url,
     )
     matches: dict[str, list[sqlite3.Row]] = {}
-    exact_downloads: dict[str, sqlite3.Row] = {}
+    family_downloads: dict[str, sqlite3.Row] = {}
     internal_posts: dict[str, sqlite3.Row] = {}
     for book in book_rows:
-        if book["download_url"]:
-            exact_downloads.setdefault(book["download_url"], book)
         internal_posts.setdefault(canonical_page_url(book["url"]), book)
-        if (
+        unrelated = (
             canonical_page_url(book["original_post_url"] or "") !=
             canonical_page_url(series_url)
             and series_identity_key(book["title"], book["url"]) != target_key
-        ):
+        )
+        if unrelated:
             continue
+        if book["download_url"]:
+            family_downloads.setdefault(book["download_url"], book)
         label = extract_catalog_label(book["title"])
         if label:
             matches.setdefault(label.casefold(), []).append(book)
@@ -4957,7 +5060,7 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         book = (
             internal_posts.get(canonical_page_url(volume["download_url"]))
             if internal_reference
-            else exact_downloads.get(volume["download_url"])
+            else family_downloads.get(volume["download_url"])
         )
         label_key = volume["label"].casefold()
         if (
@@ -5074,11 +5177,18 @@ class AppHandler(SimpleHTTPRequestHandler):
                 self.send_json({"error": "Missing series URL."}, HTTPStatus.BAD_REQUEST)
                 return
             volumes = list_series_volumes(series_url)
+            counted_volumes = sum(
+                is_counted_catalog_volume(
+                    volume["label"],
+                    volume["download_url"],
+                )
+                for volume in volumes
+            )
             self.send_json(
                 {
                     "series_url": series_url,
                     "volumes": volumes,
-                    "count": len(volumes),
+                    "count": counted_volumes,
                 }
             )
             return

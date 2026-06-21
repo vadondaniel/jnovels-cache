@@ -377,6 +377,10 @@ class ParserTests(unittest.TestCase):
             ),
             ("Sword Art Online", "Vol. 14"),
         )
+        self.assertEqual(
+            server.extract_catalog_label("Sword Art Online 14_ Alicization Uniting"),
+            "Volume 14",
+        )
 
     def test_parses_standalone_part_release(self):
         self.assertEqual(
@@ -392,6 +396,12 @@ class ParserTests(unittest.TestCase):
             server.is_named_subseries_title(
                 "Sword Art Online",
                 "Sword Art Online Progressive Volume 5",
+            )
+        )
+        self.assertTrue(
+            server.are_sibling_named_subseries(
+                "sword art online progressive",
+                "sword art online alternative gun gale online",
             )
         )
 
@@ -2899,6 +2909,74 @@ class DatabaseTests(unittest.TestCase):
             ["Volume 1", "Volume 2"],
         )
 
+    def test_groups_named_subseries_virtually_when_no_catalog_post_exists(self):
+        main_url = "https://jnovels.com/example-series/"
+        children = [
+            server.Book(
+                f"Example Progressive Volume {number}",
+                f"https://jnovels.com/example-progressive-volume-{number}/",
+                None,
+                None,
+            )
+            for number in (6, 7)
+        ]
+        server.upsert_books(
+            [
+                server.Book("Example", main_url, None, None),
+                *children,
+            ]
+        )
+        with server.connect_db() as connection:
+            connection.execute("UPDATE books SET entry_type = 'series' WHERE url = ?", (main_url,))
+            for number, child in zip((6, 7), children):
+                connection.execute(
+                    "UPDATE books SET entry_type = 'volume', original_post_url = ?, download_url = ? WHERE url = ?",
+                    (main_url, f"https://files.example/progressive-{number}", child.url),
+                )
+        server.replace_series_volumes(
+            main_url,
+            [
+                server.SeriesVolume("Volume 6", "https://files.example/progressive-6", 0),
+                server.SeriesVolume("Volume 7", "https://files.example/progressive-7", 1),
+            ],
+        )
+
+        self.assertGreater(server.split_conflated_subseries_catalogs(), 0)
+        virtual_url = server.virtual_series_url("example progressive")
+        with server.connect_db() as connection:
+            parents = connection.execute(
+                "SELECT original_post_url FROM books WHERE url IN (?, ?) ORDER BY url",
+                (children[0].url, children[1].url),
+            ).fetchall()
+        self.assertEqual(
+            [row["original_post_url"] for row in parents],
+            [virtual_url, virtual_url],
+        )
+        self.assertEqual(server.list_series_volumes(main_url), [])
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(virtual_url)],
+            ["Volume 6", "Volume 7"],
+        )
+
+    def test_resequences_years_before_volumes_and_legacy_numbered_labels(self):
+        series_url = "https://jnovels.com/example-series/"
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Year 2 Volume 1", "https://files.example/y2v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                server.SeriesVolume("Example 1_ Beginning", "https://files.example/v1", 2),
+                server.SeriesVolume("Year 2 Volume 2", "https://files.example/y2v2", 3),
+                server.SeriesVolume("Volume 2", "https://files.example/v2-old", 4),
+            ],
+        )
+        server.resequence_series_volumes(series_url)
+
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(series_url)],
+            ["Volume 1", "Volume 2", "Year 2 Volume 1", "Year 2 Volume 2"],
+        )
+
     def test_relabels_complete_fallback_from_matching_part_post(self):
         series_url = "https://jnovels.com/example-part-1-pdf/"
         part_two_url = "https://jnovels.com/example-part-2-pdf/"
@@ -3870,6 +3948,7 @@ class DatabaseTests(unittest.TestCase):
 
         saved = server.list_books("", "title_asc")[0]
         self.assertEqual(saved["volume_count"], 2)
+        self.assertEqual(saved["catalog_count"], 2)
         self.assertEqual(len(server.list_series_volumes(series_url)), 3)
 
     def test_series_refresh_reconciles_unresolved_child_download(self):
