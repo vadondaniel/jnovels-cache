@@ -1350,23 +1350,6 @@ def is_distinct_subseries_title(parent_title: str, candidate_title: str) -> bool
     ) or is_named_subseries_title(parent_title, candidate_title)
 
 
-def are_sibling_named_subseries(first: str, second: str) -> bool:
-    first_words = first.split()
-    second_words = second.split()
-    common_words = []
-    for first_word, second_word in zip(first_words, second_words):
-        if first_word != second_word:
-            break
-        common_words.append(first_word)
-    if len(common_words) < 2:
-        return False
-    parent = " ".join(common_words)
-    return is_named_subseries_title(parent, first) and is_named_subseries_title(
-        parent,
-        second,
-    )
-
-
 def qualify_numbered_subseries_badge(
     title: str,
     volume_label: str | None,
@@ -3501,27 +3484,6 @@ def split_conflated_subseries_catalogs() -> int:
         if volume_label is None:
             candidates[family_key] = row
 
-    for family_key, family in families.items():
-        if family_key in candidates or len(family) < 2:
-            continue
-        parent_title = family[0]["parent_title"]
-        if not is_named_subseries_title(parent_title, family[0]["title"]):
-            continue
-        virtual_url = virtual_series_url(family_key[1])
-        with connect_db() as connection:
-            before = connection.total_changes
-            connection.executemany(
-                "UPDATE books SET original_post_url = ? WHERE url = ?",
-                [(virtual_url, row["url"]) for row in family],
-            )
-            connection.executemany(
-                "DELETE FROM series_volumes WHERE series_url = ? AND download_url = ?",
-                [(family_key[0], row["download_url"]) for row in family],
-            )
-            changes += connection.total_changes - before
-        build_fallback_catalog(virtual_url)
-        build_fallback_catalog(family_key[0])
-
     for family_key, candidate in candidates.items():
         family = families[family_key]
         labeled = [
@@ -5012,10 +4974,6 @@ def list_books(
         volume_counts,
         download_category_counts,
     ) = get_catalog_indexes()
-    catalog_keys_by_url: dict[str, set[str]] = {}
-    for catalog_key, (catalog_url, _) in catalog_index.items():
-        catalog_keys_by_url.setdefault(catalog_url, set()).add(catalog_key)
-
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
         book["genres"] = decode_string_list(book["genres"])
@@ -5055,18 +5013,10 @@ def list_books(
         catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
         download_catalog = download_catalog_index.get(book["download_url"] or "")
         book_key = series_identity_key(book["title"], book["url"])
-        conflicting_subseries = bool(
-            download_catalog
-            and any(
-                are_sibling_named_subseries(book_key, candidate_key)
-                for candidate_key in catalog_keys_by_url.get(download_catalog[0], set())
-            )
-        )
         may_infer_catalog = not series_url or volume_counts.get(series_url, 0) <= 1
         if (
             may_infer_catalog
             and download_catalog
-            and not conflicting_subseries
             and download_catalog[1] > volume_counts.get(series_url or "", 0)
         ):
             series_url = download_catalog[0]

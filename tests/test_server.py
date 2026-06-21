@@ -398,12 +398,6 @@ class ParserTests(unittest.TestCase):
                 "Sword Art Online Progressive Volume 5",
             )
         )
-        self.assertTrue(
-            server.are_sibling_named_subseries(
-                "sword art online progressive",
-                "sword art online alternative gun gale online",
-            )
-        )
 
     def test_ignores_bare_external_site_links_in_catalog_lists(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-series/")
@@ -2909,53 +2903,29 @@ class DatabaseTests(unittest.TestCase):
             ["Volume 1", "Volume 2"],
         )
 
-    def test_groups_named_subseries_virtually_when_no_catalog_post_exists(self):
-        main_url = "https://jnovels.com/example-series/"
-        children = [
-            server.Book(
-                f"Example Progressive Volume {number}",
-                f"https://jnovels.com/example-progressive-volume-{number}/",
-                None,
-                None,
-            )
-            for number in (6, 7)
-        ]
-        server.upsert_books(
-            [
-                server.Book("Example", main_url, None, None),
-                *children,
-            ]
-        )
-        with server.connect_db() as connection:
-            connection.execute("UPDATE books SET entry_type = 'series' WHERE url = ?", (main_url,))
-            for number, child in zip((6, 7), children):
-                connection.execute(
-                    "UPDATE books SET entry_type = 'volume', original_post_url = ?, download_url = ? WHERE url = ?",
-                    (main_url, f"https://files.example/progressive-{number}", child.url),
-                )
-        server.replace_series_volumes(
-            main_url,
-            [
-                server.SeriesVolume("Volume 6", "https://files.example/progressive-6", 0),
-                server.SeriesVolume("Volume 7", "https://files.example/progressive-7", 1),
-            ],
+    def test_extracts_shared_sao_index_as_three_catalogs(self):
+        parser = server.PostDetailsParser(server.SAO_INDEX_URL)
+        parser.feed(
+            """
+            <div class="post-content">
+              <ol><li>Sword Art Online 1 <a href="https://files.example/sao-1">Download</a></li></ol>
+              <ol><li>Sword Art Online Progressive 1 <a href="https://files.example/progressive-1">Download</a></li></ol>
+              <ol><li>Gun Gale Online Vol. 1 <a href="https://files.example/ggo-1">Download</a></li></ol>
+            </div>
+            """
         )
 
-        self.assertGreater(server.split_conflated_subseries_catalogs(), 0)
-        virtual_url = server.virtual_series_url("example progressive")
-        with server.connect_db() as connection:
-            parents = connection.execute(
-                "SELECT original_post_url FROM books WHERE url IN (?, ?) ORDER BY url",
-                (children[0].url, children[1].url),
-            ).fetchall()
+        details = parser.details()
+        self.assertEqual([volume.label for volume in details.volumes], ["Volume 1"])
         self.assertEqual(
-            [row["original_post_url"] for row in parents],
-            [virtual_url, virtual_url],
-        )
-        self.assertEqual(server.list_series_volumes(main_url), [])
-        self.assertEqual(
-            [row["label"] for row in server.list_series_volumes(virtual_url)],
-            ["Volume 6", "Volume 7"],
+            {
+                key: [volume.label for volume in volumes]
+                for key, volumes in details.subseries_volumes.items()
+            },
+            {
+                "sword art online progressive": ["Volume 1"],
+                "sword art online alternative gun gale online": ["Volume 1"],
+            },
         )
 
     def test_resequences_years_before_volumes_and_legacy_numbered_labels(self):
