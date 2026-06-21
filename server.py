@@ -39,7 +39,7 @@ SERIES_INDEX_REFRESH_HOURS = 24
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
-CATALOG_RECONCILE_KEY = "catalog_reconcile_v4"
+CATALOG_RECONCILE_KEY = "catalog_reconcile_v5"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
 SERIES_METADATA_PARSER_VERSION = "6"
 SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
@@ -533,7 +533,23 @@ class PostDetailsParser(HTMLParser):
                 if volume.source_list in {0, primary_list}
                 or volume.release_group is not None
             ]
+        if any(
+            re.match(r"^(?:Volume|Part)\s+[0-9]", volume.label, re.IGNORECASE)
+            for volume in volumes
+        ):
+            volumes = [
+                volume
+                for volume in volumes
+                if not (
+                    volume.label.casefold() == "complete edition"
+                    and is_legacy_forum_landing_url(volume.download_url)
+                )
+            ]
         download_url = self.download_url
+        if download_url and all(
+            volume.download_url != download_url for volume in volumes
+        ):
+            download_url = volumes[0].download_url if volumes else None
         epub_download = next(
             (
                 volume.download_url
@@ -677,6 +693,14 @@ def is_legacy_download_url(value: str) -> bool:
             host in {"mp4directs.com", "www.mp4directs.com"}
             and "/forums/" in urllib.parse.urlparse(value).path.casefold()
         )
+    )
+
+
+def is_legacy_forum_landing_url(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value)
+    return (
+        parsed.netloc.casefold() in {"mp4directs.com", "www.mp4directs.com"}
+        and parsed.path.casefold().startswith("/forums/")
     )
 
 
@@ -3387,6 +3411,24 @@ def reconcile_catalog_relationships(*, force: bool = False) -> int:
                 'https://mp4directs.com',
                 'https://mp4directs.com/'
             )
+               OR (
+                    lower(label) = 'complete edition'
+                    AND (
+                        lower(download_url) LIKE 'http://mp4directs.com/forums/%'
+                        OR lower(download_url) LIKE 'https://mp4directs.com/forums/%'
+                        OR lower(download_url) LIKE 'http://www.mp4directs.com/forums/%'
+                        OR lower(download_url) LIKE 'https://www.mp4directs.com/forums/%'
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                        FROM series_volumes AS numbered
+                        WHERE numbered.series_url = series_volumes.series_url
+                          AND (
+                              lower(numbered.label) LIKE 'volume %'
+                              OR lower(numbered.label) LIKE 'part %'
+                          )
+                    )
+               )
             """
         )
         changes = connection.total_changes - before

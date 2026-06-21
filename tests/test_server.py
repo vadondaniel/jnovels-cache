@@ -825,6 +825,23 @@ class ParserTests(unittest.TestCase):
             ],
         )
 
+    def test_drops_legacy_forum_landing_page_from_numbered_catalog(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p>Volume 1 <a href="https://files.example/v1">Download</a></p>
+              <p><a href="https://mp4directs.com/forums/example.123/">Forum</a></p>
+            </div>
+            """
+        )
+
+        details = parser.details()
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in details.volumes],
+            [("Volume 1", "https://files.example/v1")],
+        )
+
     def test_extracts_catalog_from_titles_ending_in_volume_numbers(self):
         parser = server.PostDetailsParser("https://jnovels.com/example-series/")
         parser.feed(
