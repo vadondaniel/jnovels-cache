@@ -2219,6 +2219,36 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(saved["volume_label"], "Vol. 13")
 
+    def test_first_volume_with_multi_volume_catalog_uses_series_badge(self):
+        series_url = "https://jnovels.com/example-series/"
+        child_url = "https://jnovels.com/example-series-volume-1-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 1 Epub", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/v1",
+                [
+                    server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails("volume", series_url, "https://files.example/v1"),
+        )
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+
+        self.assertEqual(saved[child_url]["volume_label"], "Series")
+
     def test_series_catalog_uses_series_post_date_for_its_first_download(self):
         series_url = "https://example/series"
         download_url = "https://files.example/v1"

@@ -5026,8 +5026,6 @@ def list_books(
             book["title"],
             volume_label,
         )
-        if book["entry_type"] == "series":
-            volume_label = None
         series_url = (
             book["original_post_url"]
             if book["entry_type"] == "volume"
@@ -5050,13 +5048,17 @@ def list_books(
         ):
             series_url = catalog[0]
         book["series_title"] = series_title
-        book["volume_label"] = volume_label
         book["series_url"] = series_url
         book["series_page_url"] = SHARED_INDEX_SUBSERIES.get(
             book_key,
             series_url if series_url and is_internal_jnovels_url(series_url) else None,
         )
         book["volume_count"] = volume_counts.get(series_url or "", 0)
+        if book["entry_type"] == "series":
+            volume_label = None
+        elif volume_label == "Vol. 1" and book["volume_count"] > 1:
+            volume_label = "Series"
+        book["volume_label"] = volume_label
         book["catalog_count"] = download_category_counts.get(
             book["download_url"] or "",
             book["volume_count"],
