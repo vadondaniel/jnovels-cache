@@ -476,7 +476,13 @@ class PostDetailsParser(HTMLParser):
         if not download_url:
             return
         text = " ".join("".join(item["parts"]).split())
-        label = extract_catalog_label(text) or extract_trailing_catalog_label(text)
+        label = None
+        if (
+            canonical_page_url(self.post_url) == canonical_page_url(SAO_INDEX_URL)
+            and item["source_list"] == 1
+        ):
+            label = extract_sao_volume_label(text)
+        label = label or extract_catalog_label(text) or extract_trailing_catalog_label(text)
         if not label and self._release_group in {"PDF", "EPUB"}:
             label = "Complete edition"
         if not label and item["source_list"]:
@@ -911,6 +917,23 @@ def extract_catalog_label(value: str) -> str | None:
     if legacy:
         return f"Volume {normalize_volume_number(legacy.group(1))}"
     return extract_named_release_label(value)
+
+
+def extract_sao_volume_label(value: str) -> str | None:
+    cleaned = re.sub(r"\bDOWNLOAD\b\s*$", "", value, flags=re.IGNORECASE)
+    cleaned = cleaned.rstrip(" -–—.:|")
+    match = re.search(
+        r"\bSword Art Online\s+([0-9]+(?:\.[0-9]+)?)\s*_\s*(.+)$",
+        cleaned,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    subtitle = match.group(2).strip(" -–—.:|_")
+    if not subtitle:
+        return None
+    number = normalize_volume_number(match.group(1))
+    return f"Volume {number} — {subtitle}"
 
 
 def extract_trailing_catalog_label(value: str) -> str | None:

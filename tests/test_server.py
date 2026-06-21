@@ -2908,7 +2908,7 @@ class DatabaseTests(unittest.TestCase):
         parser.feed(
             """
             <div class="post-content">
-              <ol><li>Sword Art Online 1 <a href="https://files.example/sao-1">Download</a></li></ol>
+              <ol><li>Sword Art Online 1_ Aincrad ---- <a href="https://files.example/sao-1">Download</a></li></ol>
               <ol><li>Sword Art Online Progressive 1 <a href="https://files.example/progressive-1">Download</a></li></ol>
               <ol><li>Gun Gale Online Vol. 1 <a href="https://files.example/ggo-1">Download</a></li></ol>
             </div>
@@ -2916,7 +2916,10 @@ class DatabaseTests(unittest.TestCase):
         )
 
         details = parser.details()
-        self.assertEqual([volume.label for volume in details.volumes], ["Volume 1"])
+        self.assertEqual(
+            [volume.label for volume in details.volumes],
+            ["Volume 1 — Aincrad"],
+        )
         self.assertEqual(
             {
                 key: [volume.label for volume in volumes]
