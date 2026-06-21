@@ -285,8 +285,8 @@ function renderBooks(books, total) {
     } else {
       downloadLink.hidden = true;
     }
-    if (/^https?:\/\//i.test(book.original_post_url || "")) {
-      seriesLink.href = book.original_post_url;
+    if (/^https?:\/\//i.test(book.series_page_url || "")) {
+      seriesLink.href = book.series_page_url;
     } else {
       seriesLink.hidden = true;
     }
@@ -487,9 +487,9 @@ async function openCatalog(book) {
   elements.catalogDetails.hidden = !hasDetails;
   elements.catalogDetails.open = false;
   if (hasDetails) renderSeriesInformation(elements.catalogDetailsBody, book);
-  const hasSeriesPage = /^https?:\/\//i.test(book.series_url || "");
+  const hasSeriesPage = /^https?:\/\//i.test(book.series_page_url || "");
   elements.catalogSeriesLink.hidden = !hasSeriesPage;
-  if (hasSeriesPage) elements.catalogSeriesLink.href = book.series_url;
+  if (hasSeriesPage) elements.catalogSeriesLink.href = book.series_page_url;
   elements.catalogDialog.showModal();
 
   try {

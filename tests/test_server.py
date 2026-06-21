@@ -3951,6 +3951,33 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved["catalog_count"], 2)
         self.assertEqual(len(server.list_series_volumes(series_url)), 3)
 
+    def test_short_story_collection_catalog_uses_one_volume_sequence(self):
+        series_url = "https://jnovels.com/example-short-story-collection/"
+        server.upsert_books(
+            [server.Book("Example Short Story Collection", series_url, None, None)]
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE books SET entry_type = 'series' WHERE url = ?",
+                (series_url,),
+            )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume(
+                    "Short Story Collection Volume 2",
+                    "https://files.example/v2",
+                    1,
+                ),
+            ],
+        )
+
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(series_url)],
+            ["Volume 1", "Volume 2"],
+        )
+
     def test_series_refresh_reconciles_unresolved_child_download(self):
         series_url = "https://example/series"
         volume = server.Book(

@@ -39,7 +39,7 @@ SERIES_INDEX_REFRESH_HOURS = 24
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
-CATALOG_RECONCILE_KEY = "catalog_reconcile_v5"
+CATALOG_RECONCILE_KEY = "catalog_reconcile_v6"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
 SERIES_METADATA_PARSER_VERSION = "6"
 SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
@@ -62,6 +62,11 @@ MERGED_CATALOG_GROUP_OVERRIDES = {
         "Official translation",
         "Fan translation",
     ),
+}
+SAO_INDEX_URL = "https://jnovels.com/download-sword-art-online-light-novel-epub/"
+SHARED_INDEX_SUBSERIES = {
+    "sword art online progressive": SAO_INDEX_URL,
+    "sword art online alternative gun gale online": SAO_INDEX_URL,
 }
 
 _catalog_index_lock = threading.Lock()
@@ -103,6 +108,7 @@ class PostDetails:
     genres: list[str] = field(default_factory=list)
     synopsis: str | None = None
     parent_hints: list[str] = field(default_factory=list)
+    subseries_volumes: dict[str, list["SeriesVolume"]] = field(default_factory=dict)
 
 
 @dataclass
@@ -525,6 +531,26 @@ class PostDetailsParser(HTMLParser):
         synopsis = normalize_synopsis("".join(self._description_parts))
         volumes = self.volumes
         source_lists = sorted({volume.source_list for volume in volumes if volume.source_list})
+        subseries_volumes: dict[str, list[SeriesVolume]] = {}
+        if canonical_page_url(self.post_url) == canonical_page_url(SAO_INDEX_URL):
+            for source_list, identity_key in {
+                2: "sword art online progressive",
+                3: "sword art online alternative gun gale online",
+            }.items():
+                catalog = [
+                    volume for volume in volumes if volume.source_list == source_list
+                ]
+                if catalog:
+                    subseries_volumes[identity_key] = [
+                        SeriesVolume(
+                            volume.label,
+                            volume.download_url,
+                            position,
+                            volume.release_group,
+                            volume.source_list,
+                        )
+                        for position, volume in enumerate(catalog)
+                    ]
         if len(source_lists) > 1:
             primary_list = source_lists[0]
             volumes = [
@@ -569,6 +595,7 @@ class PostDetailsParser(HTMLParser):
             self._genres,
             synopsis,
             self._parent_hints,
+            subseries_volumes,
         )
 
 
@@ -2752,6 +2779,18 @@ def update_book_details(url: str, details: PostDetails) -> None:
     )
     if catalog_url:
         relabel_catalog_entries_from_books(catalog_url)
+    for subseries_key, volumes in details.subseries_volumes.items():
+        replace_series_volumes(virtual_series_url(subseries_key), volumes)
+    identity_key = ""
+    with connect_db() as connection:
+        refreshed_book = connection.execute(
+            "SELECT title FROM books WHERE url = ?",
+            (url,),
+        ).fetchone()
+    if refreshed_book:
+        identity_key = series_identity_key(refreshed_book["title"], url)
+    if identity_key in SHARED_INDEX_SUBSERIES or url in SHARED_INDEX_SUBSERIES.values():
+        reconcile_shared_index_subseries()
 
 
 def validate_post_details(details: PostDetails) -> None:
@@ -3526,6 +3565,62 @@ def split_conflated_subseries_catalogs() -> int:
     return changes
 
 
+def reconcile_shared_index_subseries() -> int:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT title, url, entry_type, original_post_url, download_url
+            FROM books
+            """
+        ).fetchall()
+
+    changes = 0
+    for identity_key, index_url in SHARED_INDEX_SUBSERIES.items():
+        family = [
+            row
+            for row in rows
+            if series_identity_key(row["title"], row["url"]) == identity_key
+        ]
+        if not family:
+            continue
+        virtual_url = virtual_series_url(identity_key)
+        old_catalogs = {
+            row["url"]
+            for row in family
+            if row["entry_type"] == "series" and row["url"] != virtual_url
+        }
+        family_downloads = {
+            row["download_url"] for row in family if row["download_url"]
+        }
+        with connect_db() as connection:
+            before = connection.total_changes
+            connection.executemany(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = ?
+                WHERE url = ?
+                """,
+                [(virtual_url, row["url"]) for row in family],
+            )
+            connection.executemany(
+                "DELETE FROM series_volumes WHERE series_url = ?",
+                [(url,) for url in old_catalogs],
+            )
+            connection.executemany(
+                "DELETE FROM series_status WHERE series_url = ?",
+                [(url,) for url in old_catalogs],
+            )
+            connection.executemany(
+                "DELETE FROM series_volumes WHERE series_url = ? AND download_url = ?",
+                [(index_url, download_url) for download_url in family_downloads],
+            )
+            changes += connection.total_changes - before
+        build_fallback_catalog(virtual_url)
+        resequence_series_volumes(virtual_url)
+    invalidate_catalog_indexes()
+    return changes
+
+
 def reconcile_catalog_relationships(*, force: bool = False) -> int:
     with connect_db() as connection:
         if not force and connection.execute(
@@ -3568,6 +3663,7 @@ def reconcile_catalog_relationships(*, force: bool = False) -> int:
     changes += merge_overlapping_catalog_aliases()
     changes += reconcile_legacy_volume_entries(force=True)
     changes += split_conflated_subseries_catalogs()
+    changes += reconcile_shared_index_subseries()
     with connect_db() as connection:
         parent_urls = [
             row["original_post_url"]
@@ -3618,6 +3714,7 @@ def cleanup_misclassified_series_tracking() -> int:
               AND b.original_post_url IS NOT NULL
               AND lower(b.original_post_url) NOT LIKE 'https://jnovels.com/%'
               AND lower(b.original_post_url) NOT LIKE 'https://www.jnovels.com/%'
+              AND lower(b.original_post_url) NOT LIKE 'virtual://jnovels/%'
             ORDER BY b.original_post_url, b.id
             """
         ).fetchall()
@@ -4978,6 +5075,10 @@ def list_books(
         book["series_title"] = series_title
         book["volume_label"] = volume_label
         book["series_url"] = series_url
+        book["series_page_url"] = SHARED_INDEX_SUBSERIES.get(
+            book_key,
+            series_url if series_url and is_internal_jnovels_url(series_url) else None,
+        )
         book["volume_count"] = volume_counts.get(series_url or "", 0)
         book["catalog_count"] = download_category_counts.get(
             book["download_url"] or "",
@@ -5029,6 +5130,14 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
         series_book["title"] if series_book else None,
         series_url,
     )
+    if series_book and "short story collection" in series_book["title"].casefold():
+        for volume in rows:
+            volume["label"] = re.sub(
+                r"^Short Story Collection\s+",
+                "",
+                volume["label"],
+                flags=re.IGNORECASE,
+            )
     matches: dict[str, list[sqlite3.Row]] = {}
     family_downloads: dict[str, sqlite3.Row] = {}
     internal_posts: dict[str, sqlite3.Row] = {}
@@ -5119,8 +5228,6 @@ class AppHandler(SimpleHTTPRequestHandler):
             }:
                 entry_filter = "all"
             filter_counts = count_book_filters()
-            if entry_filter != "all" and not filter_counts[entry_filter]:
-                entry_filter = "all"
             page = parse_positive_int(params.get("page", ["1"])[0], 1)
             page_size = min(
                 parse_positive_int(
