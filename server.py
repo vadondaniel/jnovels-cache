@@ -39,7 +39,7 @@ SERIES_INDEX_REFRESH_HOURS = 24
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
-CATALOG_RECONCILE_KEY = "catalog_reconcile_v3"
+CATALOG_RECONCILE_KEY = "catalog_reconcile_v4"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
 SERIES_METADATA_PARSER_VERSION = "6"
 SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
@@ -415,6 +415,8 @@ class PostDetailsParser(HTMLParser):
             return
 
         parsed_href = urllib.parse.urlparse(href)
+        if is_external_site_root(href):
+            return
         genre = text.rstrip(", ")
         if (
             parsed_href.netloc.casefold() in {"jnovels.com", "www.jnovels.com"}
@@ -660,6 +662,11 @@ def is_external_http_url(value: str) -> bool:
         "jnovels.com",
         "www.jnovels.com",
     }
+
+
+def is_external_site_root(value: str) -> bool:
+    parsed = urllib.parse.urlparse(value)
+    return is_external_http_url(value) and parsed.path in {"", "/"} and not parsed.query
 
 
 def is_legacy_download_url(value: str) -> bool:
@@ -2667,6 +2674,11 @@ def update_book_details(url: str, details: PostDetails) -> None:
         )
     if details.entry_type == "series" and not inferred_parent:
         merge_overlapping_catalog_aliases(url)
+    catalog_url = details.original_post_url or (
+        url if details.entry_type == "series" else None
+    )
+    if catalog_url:
+        relabel_catalog_entries_from_books(catalog_url)
 
 
 def validate_post_details(details: PostDetails) -> None:
@@ -3048,6 +3060,52 @@ def resequence_series_volumes(series_url: str) -> None:
         )
 
 
+def relabel_catalog_entries_from_books(series_url: str | None = None) -> int:
+    where_clause = "WHERE sv.series_url = ?" if series_url else ""
+    params: tuple[str, ...] = (series_url,) if series_url else ()
+    with connect_db() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT sv.id, sv.label, sv.series_url,
+                   child.title AS child_title, child.url AS child_url
+            FROM series_volumes AS sv
+            JOIN books AS child ON child.download_url = sv.download_url
+                AND (
+                    child.url = sv.series_url
+                    OR child.original_post_url = sv.series_url
+                )
+            {where_clause}
+            ORDER BY sv.id,
+                     child.url = sv.series_url DESC,
+                     child.published_at DESC,
+                     child.id DESC
+            """,
+            params,
+        ).fetchall()
+        corrections = []
+        affected_series: set[str] = set()
+        seen_ids: set[int] = set()
+        for row in rows:
+            if row["id"] in seen_ids:
+                continue
+            seen_ids.add(row["id"])
+            label = extract_catalog_label(row["child_title"])
+            current_label = extract_catalog_label(row["label"]) or row["label"]
+            if label and label.casefold() != current_label.casefold():
+                corrections.append((label, row["id"]))
+                affected_series.add(row["series_url"])
+        if corrections:
+            connection.executemany(
+                "UPDATE series_volumes SET label = ? WHERE id = ?",
+                corrections,
+            )
+    if corrections:
+        for affected_url in affected_series:
+            resequence_series_volumes(affected_url)
+        invalidate_catalog_indexes()
+    return len(corrections)
+
+
 def build_missing_fallback_catalogs() -> int:
     with connect_db() as connection:
         rows = connection.execute(
@@ -3318,7 +3376,21 @@ def reconcile_catalog_relationships(*, force: bool = False) -> int:
             (CATALOG_RECONCILE_KEY,),
         ).fetchone():
             return 0
-    changes = merge_overlapping_catalog_aliases()
+    with connect_db() as connection:
+        before = connection.total_changes
+        connection.execute(
+            """
+            DELETE FROM series_volumes
+            WHERE download_url IN (
+                'http://mp4directs.com',
+                'http://mp4directs.com/',
+                'https://mp4directs.com',
+                'https://mp4directs.com/'
+            )
+            """
+        )
+        changes = connection.total_changes - before
+    changes += merge_overlapping_catalog_aliases()
     changes += reconcile_legacy_volume_entries(force=True)
     changes += split_conflated_subseries_catalogs()
     with connect_db() as connection:
@@ -3336,6 +3408,7 @@ def reconcile_catalog_relationships(*, force: bool = False) -> int:
     changes += sum(build_fallback_catalog(url) for url in parent_urls)
     for parent_url in parent_urls:
         resequence_series_volumes(parent_url)
+    changes += relabel_catalog_entries_from_books()
     with connect_db() as connection:
         connection.execute(
             """

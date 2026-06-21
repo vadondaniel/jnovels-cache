@@ -394,6 +394,24 @@ class ParserTests(unittest.TestCase):
                 "Sword Art Online Progressive Volume 5",
             )
         )
+
+    def test_ignores_bare_external_site_links_in_catalog_lists(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <ul>
+                <li>Volume 1 <a href="https://files.example/v1">Download</a></li>
+                <li><a href="https://mp4directs.com/">MP4Directs</a></li>
+              </ul>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in parser.details().volumes],
+            [("Volume 1", "https://files.example/v1")],
+        )
         self.assertFalse(
             server.is_named_subseries_title(
                 "Death March",
@@ -2789,6 +2807,48 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             [row["label"] for row in server.list_series_volumes(parent_url)],
             ["Volume 1", "Volume 2"],
+        )
+
+    def test_relabels_complete_fallback_from_matching_part_post(self):
+        series_url = "https://jnovels.com/example-part-1-pdf/"
+        part_two_url = "https://jnovels.com/example-part-2-pdf/"
+        part_one_download = "https://files.example/part-1"
+        part_two_download = "https://files.example/part-2"
+        server.upsert_books(
+            [
+                server.Book("Example Part 1 PDF", series_url, None, None),
+                server.Book("Example Part 2 PDF", part_two_url, None, None),
+            ]
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'series', download_url = ?
+                WHERE url = ?
+                """,
+                (part_one_download, series_url),
+            )
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = ?, download_url = ?
+                WHERE url = ?
+                """,
+                (series_url, part_two_download, part_two_url),
+            )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Part 2", part_two_download, 0),
+                server.SeriesVolume("Complete edition", part_one_download, 1),
+            ],
+        )
+
+        self.assertEqual(server.relabel_catalog_entries_from_books(series_url), 1)
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(series_url)],
+            ["Part 1", "Part 2"],
         )
 
     def test_reconciles_existing_series_classified_volume_entries(self):
