@@ -2780,7 +2780,9 @@ def update_book_details(url: str, details: PostDetails) -> None:
     if catalog_url:
         relabel_catalog_entries_from_books(catalog_url)
     for subseries_key, volumes in details.subseries_volumes.items():
-        replace_series_volumes(virtual_series_url(subseries_key), volumes)
+        subseries_url = virtual_series_url(subseries_key)
+        replace_series_volumes(subseries_url, volumes)
+        mark_series_metadata_checked(subseries_url, now)
     identity_key = ""
     with connect_db() as connection:
         refreshed_book = connection.execute(
@@ -3617,6 +3619,7 @@ def reconcile_shared_index_subseries() -> int:
             changes += connection.total_changes - before
         build_fallback_catalog(virtual_url)
         resequence_series_volumes(virtual_url)
+        mark_series_metadata_checked(virtual_url)
     invalidate_catalog_indexes()
     return changes
 
