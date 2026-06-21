@@ -2724,11 +2724,14 @@ class DatabaseTests(unittest.TestCase):
         parent_url = "https://jnovels.com/example-light-novel-epub/"
         subseries_url = "https://jnovels.com/example-zero-light-novel-epub/"
         volume_url = "https://jnovels.com/example-zero-volume-2-epub/"
+        main_volume_url = "https://jnovels.com/example-volume-2-epub/"
+        shared_download = "https://files.example/shared-2"
         server.upsert_books(
             [
                 server.Book("Example Light Novel Epub", parent_url, None, None),
                 server.Book("Example ZERO Light Novel Epub", subseries_url, None, None),
                 server.Book("Example ZERO Volume 2 Epub", volume_url, None, None),
+                server.Book("Example Volume 2 Epub", main_volume_url, None, None),
             ]
         )
         with server.connect_db() as connection:
@@ -2742,7 +2745,7 @@ class DatabaseTests(unittest.TestCase):
                 SET entry_type = 'volume', original_post_url = ?, download_url = ?
                 WHERE url = ?
                 """,
-                (parent_url, "https://files.example/zero-1", subseries_url),
+                (parent_url, shared_download, subseries_url),
             )
             connection.execute(
                 """
@@ -2752,6 +2755,21 @@ class DatabaseTests(unittest.TestCase):
                 """,
                 (parent_url, "https://files.example/zero-2", volume_url),
             )
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = ?, download_url = ?
+                WHERE url = ?
+                """,
+                (parent_url, shared_download, main_volume_url),
+            )
+        server.replace_series_volumes(
+            parent_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/main-1", 0),
+                server.SeriesVolume("Volume 2", shared_download, 1),
+            ],
+        )
 
         self.assertGreater(server.split_conflated_subseries_catalogs(), 0)
         with server.connect_db() as connection:
@@ -2768,6 +2786,10 @@ class DatabaseTests(unittest.TestCase):
             ("series", None),
         )
         self.assertEqual(volume["original_post_url"], subseries_url)
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(parent_url)],
+            ["Volume 1", "Volume 2"],
+        )
 
     def test_reconciles_existing_series_classified_volume_entries(self):
         series_url = "https://jnovels.com/example-all-volumes-epub/"

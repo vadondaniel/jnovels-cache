@@ -39,7 +39,7 @@ SERIES_INDEX_REFRESH_HOURS = 24
 SYNC_CHECKPOINT_KEY = "active_sync"
 LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
 LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
-CATALOG_RECONCILE_KEY = "catalog_reconcile_v2"
+CATALOG_RECONCILE_KEY = "catalog_reconcile_v3"
 SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
 SERIES_METADATA_PARSER_VERSION = "6"
 SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
@@ -3006,8 +3006,46 @@ def build_fallback_catalog(
             """,
             (series_url, now),
         )
+    resequence_series_volumes(series_url)
     invalidate_catalog_indexes()
     return len(volumes)
+
+
+def resequence_series_volumes(series_url: str) -> None:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT id, label, position, release_group
+            FROM series_volumes
+            WHERE series_url = ?
+            ORDER BY position, id
+            """,
+            (series_url,),
+        ).fetchall()
+        group_order: dict[str, int] = {}
+        for row in rows:
+            group_key = (row["release_group"] or "").casefold()
+            group_order.setdefault(group_key, len(group_order))
+
+        def volume_order(row: sqlite3.Row) -> tuple[int, int, float, int]:
+            group_key = (row["release_group"] or "").casefold()
+            match = re.search(
+                r"\b(?:Volume|Vol\.|Part)\s+([0-9]+(?:\.[0-9]+)?)",
+                row["label"],
+                re.IGNORECASE,
+            )
+            return (
+                group_order[group_key],
+                int(match is None),
+                float(match.group(1)) if match else float("inf"),
+                row["position"],
+            )
+
+        ordered = sorted(rows, key=volume_order)
+        connection.executemany(
+            "UPDATE series_volumes SET position = ? WHERE id = ?",
+            [(position, row["id"]) for position, row in enumerate(ordered)],
+        )
 
 
 def build_missing_fallback_catalogs() -> int:
@@ -3268,6 +3306,7 @@ def split_conflated_subseries_catalogs() -> int:
                 "DELETE FROM series_volumes WHERE series_url = ? AND download_url = ?",
                 [(parent_url, value) for value in family_downloads],
             )
+        build_fallback_catalog(parent_url)
         invalidate_catalog_indexes()
     return changes
 
@@ -3282,6 +3321,21 @@ def reconcile_catalog_relationships(*, force: bool = False) -> int:
     changes = merge_overlapping_catalog_aliases()
     changes += reconcile_legacy_volume_entries(force=True)
     changes += split_conflated_subseries_catalogs()
+    with connect_db() as connection:
+        parent_urls = [
+            row["original_post_url"]
+            for row in connection.execute(
+                """
+                SELECT DISTINCT original_post_url
+                FROM books
+                WHERE entry_type = 'volume'
+                  AND original_post_url IS NOT NULL
+                """
+            ).fetchall()
+        ]
+    changes += sum(build_fallback_catalog(url) for url in parent_urls)
+    for parent_url in parent_urls:
+        resequence_series_volumes(parent_url)
     with connect_db() as connection:
         connection.execute(
             """
