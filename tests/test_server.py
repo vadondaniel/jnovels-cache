@@ -2755,6 +2755,79 @@ class DatabaseTests(unittest.TestCase):
                 ).fetchone()
             )
 
+    def test_merges_tiny_legacy_volume_catalog_using_established_child_alias(self):
+        canonical_url = "https://jnovels.com/japanese-title-all-volumes-epub/"
+        legacy_url = "https://jnovels.com/english-title-volume-2-epub/"
+        canonical_child_url = "https://jnovels.com/english-title-extended-volume-4-epub/"
+        legacy_child_url = "https://jnovels.com/english-title-volume-1-epub/"
+        shared_download = "https://files.example/v4"
+        server.upsert_books(
+            [
+                server.Book("Japanese Title All Volumes EPUB", canonical_url, None, None),
+                server.Book("English Title Volume 2 EPUB", legacy_url, None, None),
+                server.Book(
+                    "English Title Extended Volume 4 EPUB",
+                    canonical_child_url,
+                    None,
+                    None,
+                ),
+                server.Book("English Title Volume 1 EPUB", legacy_child_url, None, None),
+            ]
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                "UPDATE books SET entry_type = 'series' WHERE url IN (?, ?)",
+                (canonical_url, legacy_url),
+            )
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = ?, download_url = ?
+                WHERE url = ?
+                """,
+                (canonical_url, shared_download, canonical_child_url),
+            )
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume', original_post_url = ?, download_url = ?
+                WHERE url = ?
+                """,
+                (legacy_url, "https://files.example/v1", legacy_child_url),
+            )
+        server.replace_series_volumes(
+            canonical_url,
+            [
+                server.SeriesVolume(
+                    f"Volume {number}",
+                    shared_download if number == 4 else f"https://files.example/main-{number}",
+                    number - 1,
+                )
+                for number in range(1, 10)
+            ],
+        )
+        server.replace_series_volumes(
+            legacy_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 0),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                server.SeriesVolume("Volume 4", shared_download, 2),
+            ],
+        )
+
+        self.assertGreater(server.merge_overlapping_catalog_aliases(), 0)
+        with server.connect_db() as connection:
+            legacy = connection.execute(
+                "SELECT entry_type, original_post_url FROM books WHERE url = ?",
+                (legacy_url,),
+            ).fetchone()
+            child = connection.execute(
+                "SELECT original_post_url FROM books WHERE url = ?",
+                (legacy_child_url,),
+            ).fetchone()
+        self.assertEqual((legacy["entry_type"], legacy["original_post_url"]), ("volume", canonical_url))
+        self.assertEqual(child["original_post_url"], canonical_url)
+
     def test_restores_conflated_subseries_with_its_own_catalog_page(self):
         parent_url = "https://jnovels.com/example-light-novel-epub/"
         subseries_url = "https://jnovels.com/example-zero-light-novel-epub/"
