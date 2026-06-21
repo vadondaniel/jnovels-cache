@@ -344,6 +344,20 @@ class ParserTests(unittest.TestCase):
                 )
                 self.assertEqual(badge, expected_badge)
 
+    def test_does_not_treat_subtitle_part_numbers_as_volume_subdivisions(self):
+        cases = [
+            ("Sword Art Online Volume 19 Moon Cradle Part 1 Epub", "Vol. 19"),
+            ("Sword Art Online Volume 20 Moon Cradle Part 2 Epub", "Vol. 20"),
+        ]
+
+        for title, expected_badge in cases:
+            with self.subTest(title=title):
+                _, badge = server.parse_book_identity(
+                    title,
+                    "https://jnovels.com/sword-art-online-light-novel-epub/",
+                )
+                self.assertEqual(badge, expected_badge)
+
     def test_strips_comma_separated_abbreviated_volume_from_series_title(self):
         self.assertEqual(
             server.parse_book_identity(

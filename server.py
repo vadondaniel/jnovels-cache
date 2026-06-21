@@ -1014,7 +1014,8 @@ def roman_to_integer(value: str) -> int | None:
 def compact_volume_badge(number: str, suffix: str) -> str:
     normalized_number = normalize_volume_designator(number)
     qualifier = re.search(
-        r"\b(Part|Act|Canto)\s+([0-9]+|[IVX]+)\b",
+        r"(?:^\s*[,\-:–—]?\s*|,\s*)"
+        r"(Part|Act|Canto)\s+([0-9]+|[IVX]+)\b",
         suffix,
         re.IGNORECASE,
     )
