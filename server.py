@@ -2782,6 +2782,7 @@ def update_book_details(url: str, details: PostDetails) -> None:
     for subseries_key, volumes in details.subseries_volumes.items():
         subseries_url = virtual_series_url(subseries_key)
         replace_series_volumes(subseries_url, volumes)
+        reconcile_series_downloads(subseries_url)
         mark_series_metadata_checked(subseries_url, now)
     identity_key = ""
     with connect_db() as connection:

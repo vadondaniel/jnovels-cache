@@ -292,7 +292,10 @@ function renderBooks(books, total) {
     }
     if (book.volume_count > 1) {
       const catalogName = book.catalog_kind === "downloads" ? "Downloads" : "Volumes";
-      catalogButton.textContent = `${catalogName} · ${book.catalog_count}`;
+      const catalogCount = book.catalog_kind === "downloads"
+        ? book.catalog_count
+        : book.volume_count;
+      catalogButton.textContent = `${catalogName} · ${catalogCount}`;
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
       catalogButton.hidden = true;
