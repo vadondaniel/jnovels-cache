@@ -1,0 +1,56 @@
+@media (max-width: 1080px) {
+  .control-panel { grid-template-columns: 1fr; }
+  .controls { grid-template-columns: 1fr auto; }
+  .book-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 820px) {
+  .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (max-width: 650px) {
+  .wrap { width: min(100% - 24px, 1180px); }
+  .hero { min-height: 118px; }
+  .nav { height: 66px; }
+  .source-link { font-size: 0; }
+  .source-link span { font-size: 1.2rem; }
+  .control-panel { margin-top: -22px; padding: 12px; }
+  .controls { grid-template-columns: 1fr; }
+  .sync-dialog__header, .sync-dialog__form { padding-right: 20px; padding-left: 20px; }
+  .sync-dialog__actions .button { flex: 1; }
+  .repair-failure { align-items: flex-start; }
+  .repair-dialog__footer { flex-direction: column; }
+  .repair-dialog__footer .button { width: 100%; }
+  .details-dialog__header,
+  .details-dialog__body { padding-right: 20px; padding-left: 20px; }
+  .catalog-dialog__details summary { padding-right: 20px; padding-left: 20px; }
+  .catalog-dialog__details > div { padding-right: 20px; padding-left: 20px; }
+  .status-row { align-items: flex-start; gap: 8px; padding: 20px 0; flex-direction: column; }
+  .status-row__activity { justify-content: flex-start; flex-wrap: wrap; }
+  .entry-filters { width: 100%; }
+  .entry-filters button { flex: 1; padding-inline: 6px; }
+  .book-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 10px; padding-top: 18px; }
+  .book-card__body { min-height: 135px; padding: 13px; }
+  .book-card h2 { font-size: .91rem; }
+  .book-card__open { display: none; }
+  .catalog-dialog__volume-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .catalog-dialog__volume-grid.is-related { grid-template-columns: 1fr; }
+  .pagination { display: grid; grid-template-columns: repeat(4, 1fr); }
+  .pagination__jump { grid-column: 1 / -1; grid-row: 1; }
+  .pagination button { padding-inline: 8px; }
+}
+
+@media (max-width: 380px) {
+  .book-grid { grid-template-columns: 1fr; }
+}
+
+@media (hover: none) {
+  .book-card__quick-actions {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; }
+}
