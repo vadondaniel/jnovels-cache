@@ -1,92 +1,18 @@
 import { request } from "./app/api.js";
+import { elements } from "./app/elements.js";
 import { estimateSyncTime, formatDate } from "./app/formatters.js";
-
-const state = {
-  books: [],
-  pollTimer: null,
-  searchTimer: null,
-  page: 1,
-  pageSize: 24,
-  pages: 1,
-  total: 0,
-  loadSequence: 0,
-  health: {},
-  cacheCount: 0,
-  filter: "all",
-  filterCounts: {},
-  syncNotice: null,
-  entryUrl: null,
-};
-
-const defaultSort = "published_desc";
-const searchDebounceMs = 400;
-const validSorts = new Set(["published_desc", "published_asc", "title_asc", "title_desc", "cached_desc"]);
-const validFilters = new Set(["all", "series", "volumes", "pending", "favorites", "hidden"]);
-
-const elements = {
-  search: document.querySelector("#search"),
-  searchClear: document.querySelector("#search-clear"),
-  sourceSearch: document.querySelector("#source-search"),
-  sort: document.querySelector("#sort"),
-  grid: document.querySelector("#book-grid"),
-  count: document.querySelector("#result-count"),
-  lastSync: document.querySelector("#last-sync"),
-  filterButtons: [...document.querySelectorAll("[data-filter]")],
-  entryFilters: document.querySelector("#entry-filters"),
-  cacheHealth: document.querySelector("#cache-health"),
-  syncStatus: document.querySelector("#sync-status"),
-  syncStatusLabel: document.querySelector("#sync-status-label"),
-  syncStatusDetail: document.querySelector("#sync-status-detail"),
-  syncToggle: document.querySelector("#sync-toggle"),
-  syncDialog: document.querySelector("#sync-dialog"),
-  syncClose: document.querySelector("#sync-close"),
-  syncCancel: document.querySelector("#sync-cancel"),
-  syncForm: document.querySelector("#sync-form"),
-  syncMode: document.querySelector("#sync-mode"),
-  startPageField: document.querySelector("#start-page-field"),
-  startPage: document.querySelector("#start-page"),
-  maxPagesLabel: document.querySelector("#max-pages-label"),
-  maxPages: document.querySelector("#max-pages"),
-  delay: document.querySelector("#delay"),
-  syncHelp: document.querySelector("#sync-help"),
-  repairDialog: document.querySelector("#repair-dialog"),
-  repairSummary: document.querySelector("#repair-summary"),
-  repairList: document.querySelector("#repair-list"),
-  repairClose: document.querySelector("#repair-close"),
-  refreshSeries: document.querySelector("#refresh-series"),
-  repairAll: document.querySelector("#repair-all"),
-  empty: document.querySelector("#empty-state"),
-  emptyTitle: document.querySelector("#empty-title"),
-  emptyText: document.querySelector("#empty-text"),
-  emptySync: document.querySelector("#empty-sync"),
-  pagination: document.querySelector("#pagination"),
-  pageFirst: document.querySelector("#page-first"),
-  pagePrevious: document.querySelector("#page-previous"),
-  pageNumber: document.querySelector("#page-number"),
-  pageTotal: document.querySelector("#page-total"),
-  pageNext: document.querySelector("#page-next"),
-  pageLast: document.querySelector("#page-last"),
-  template: document.querySelector("#book-template"),
-  toast: document.querySelector("#toast"),
-  catalogDialog: document.querySelector("#catalog-dialog"),
-  catalogEyebrow: document.querySelector("#catalog-eyebrow"),
-  catalogTitle: document.querySelector("#catalog-title"),
-  catalogCount: document.querySelector("#catalog-count"),
-  catalogList: document.querySelector("#catalog-list"),
-  catalogDetails: document.querySelector("#catalog-details"),
-  catalogDetailsBody: document.querySelector("#catalog-details-body"),
-  catalogSeriesLink: document.querySelector("#catalog-series-link"),
-  catalogClose: document.querySelector("#catalog-close"),
-  detailsDialog: document.querySelector("#details-dialog"),
-  detailsTitle: document.querySelector("#details-title"),
-  detailsGenresSection: document.querySelector("#details-genres-section"),
-  detailsGenres: document.querySelector("#details-genres"),
-  detailsNamesSection: document.querySelector("#details-names-section"),
-  detailsNames: document.querySelector("#details-names"),
-  detailsSynopsisSection: document.querySelector("#details-synopsis-section"),
-  detailsSynopsis: document.querySelector("#details-synopsis"),
-  detailsClose: document.querySelector("#details-close"),
-};
+import {
+  searchDebounceMs,
+  state,
+  validFilters,
+} from "./app/state.js";
+import {
+  applyViewFromUrl,
+  syncViewUrl,
+  updateFilterButtons,
+  updateSearchClearButton,
+  updateSourceSearchLink,
+} from "./app/view.js";
 
 function catalogGroupFormat(groupName) {
   if (/\bpdf\b/i.test(groupName)) return "pdf";
@@ -98,59 +24,6 @@ function visibleCatalogGroupName(groupName, hasVisiblePdfGroup) {
   if (!groupName || hasVisiblePdfGroup) return groupName;
   const withoutEpub = groupName.replace(/\s*\bEPUB\b\s*$/i, "").trim();
   return withoutEpub === groupName ? groupName : withoutEpub;
-}
-
-function updateFilterButtons() {
-  let availableCategoryCount = 0;
-  elements.filterButtons.forEach((button) => {
-    const filter = button.dataset.filter;
-    button.hidden = filter !== "all" && !(state.filterCounts[filter] || 0);
-    if (filter !== "all" && !button.hidden) availableCategoryCount += 1;
-    button.setAttribute("aria-pressed", String(button.dataset.filter === state.filter));
-  });
-  elements.entryFilters.hidden = availableCategoryCount < 2;
-}
-
-function updateSourceSearchLink() {
-  const url = new URL("https://jnovels.com/");
-  const query = elements.search.value.trim();
-  url.searchParams.set("s", query ? `epub ${query}` : "epub");
-  elements.sourceSearch.href = url;
-}
-
-function updateSearchClearButton() {
-  elements.searchClear.hidden = !elements.search.value;
-}
-
-function applyViewFromUrl() {
-  const params = new URLSearchParams(window.location.search);
-  const page = Number.parseInt(params.get("page") || "1", 10);
-  const sort = params.get("sort") || defaultSort;
-  const entryFilter = params.get("filter") || "all";
-
-  elements.search.value = params.get("q") || "";
-  state.entryUrl = params.get("entry") || null;
-  updateSearchClearButton();
-  elements.sort.value = validSorts.has(sort) ? sort : defaultSort;
-  state.filter = validFilters.has(entryFilter) ? entryFilter : "all";
-  state.page = Number.isNaN(page) ? 1 : Math.max(page, 1);
-  updateSourceSearchLink();
-  updateFilterButtons();
-}
-
-function syncViewUrl(mode = "replace") {
-  const url = new URL(window.location.href);
-  ["q", "sort", "filter", "page", "entry"].forEach((key) => url.searchParams.delete(key));
-
-  const query = elements.search.value.trim();
-  if (query) url.searchParams.set("q", query);
-  if (elements.sort.value !== defaultSort) url.searchParams.set("sort", elements.sort.value);
-  if (state.filter !== "all") url.searchParams.set("filter", state.filter);
-  if (state.page > 1) url.searchParams.set("page", String(state.page));
-  if (state.entryUrl) url.searchParams.set("entry", state.entryUrl);
-
-  const method = mode === "push" ? "pushState" : "replaceState";
-  window.history[method]({}, "", url);
 }
 
 function showToast(message, isError = false) {
