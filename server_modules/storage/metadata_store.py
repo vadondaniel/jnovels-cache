@@ -4,6 +4,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from contextlib import AbstractContextManager
+from datetime import datetime, timezone
 from typing import Any
 
 
@@ -100,6 +101,80 @@ def get_public_metadata(
     for key in hidden_keys:
         metadata.pop(key, None)
     return metadata
+
+
+def prepare_legacy_reparse(connect_db: ConnectDb, legacy_reparse_key: str) -> int:
+    with connect_db() as connection:
+        if connection.execute(
+            "SELECT 1 FROM metadata WHERE key = ?",
+            (legacy_reparse_key,),
+        ).fetchone():
+            return 0
+
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE books
+            SET entry_type = 'series',
+                original_post_url = NULL
+            WHERE original_post_url = url
+            """
+        )
+        connection.execute(
+            """
+            UPDATE series_status
+            SET metadata_checked_at = NULL
+            WHERE series_url IN (
+                SELECT url
+                FROM books
+                WHERE entry_type = 'series'
+                  AND (
+                      lower(title) LIKE '%webnovel%'
+                      OR lower(title) LIKE '%[pdf]%'
+                      OR lower(title) LIKE '%[epub]%'
+                      OR lower(url) LIKE '%pdfepub%'
+                  )
+            )
+            """
+        )
+        changes = connection.total_changes - before
+        connection.execute(
+            "INSERT INTO metadata (key, value) VALUES (?, ?)",
+            (legacy_reparse_key, datetime.now(timezone.utc).isoformat(timespec="seconds")),
+        )
+    return changes
+
+
+def prepare_series_metadata_refresh(
+    connect_db: ConnectDb,
+    parser_key: str,
+    parser_version: str,
+) -> int:
+    with connect_db() as connection:
+        current_version = connection.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (parser_key,),
+        ).fetchone()
+        if current_version and current_version["value"] == parser_version:
+            return 0
+
+        before = connection.total_changes
+        connection.execute(
+            """
+            UPDATE series_status
+            SET metadata_checked_at = NULL
+            WHERE unavailable_at IS NULL
+            """
+        )
+        changes = connection.total_changes - before
+        connection.execute(
+            """
+            INSERT INTO metadata (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (parser_key, parser_version),
+        )
+    return changes
 
 
 def save_sync_checkpoint(

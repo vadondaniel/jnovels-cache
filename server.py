@@ -801,73 +801,15 @@ def get_public_metadata(
 
 
 def prepare_legacy_reparse() -> int:
-    with connect_db() as connection:
-        if connection.execute(
-            "SELECT 1 FROM metadata WHERE key = ?",
-            (LEGACY_REPARSE_KEY,),
-        ).fetchone():
-            return 0
-
-        before = connection.total_changes
-        connection.execute(
-            """
-            UPDATE books
-            SET entry_type = 'series',
-                original_post_url = NULL
-            WHERE original_post_url = url
-            """
-        )
-        connection.execute(
-            """
-            UPDATE series_status
-            SET metadata_checked_at = NULL
-            WHERE series_url IN (
-                SELECT url
-                FROM books
-                WHERE entry_type = 'series'
-                  AND (
-                      lower(title) LIKE '%webnovel%'
-                      OR lower(title) LIKE '%[pdf]%'
-                      OR lower(title) LIKE '%[epub]%'
-                      OR lower(url) LIKE '%pdfepub%'
-                  )
-            )
-            """
-        )
-        changes = connection.total_changes - before
-        connection.execute(
-            "INSERT INTO metadata (key, value) VALUES (?, ?)",
-            (LEGACY_REPARSE_KEY, datetime.now(timezone.utc).isoformat(timespec="seconds")),
-        )
-    return changes
+    return metadata_store.prepare_legacy_reparse(connect_db, LEGACY_REPARSE_KEY)
 
 
 def prepare_series_metadata_refresh() -> int:
-    with connect_db() as connection:
-        current_version = connection.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (SERIES_METADATA_PARSER_KEY,),
-        ).fetchone()
-        if current_version and current_version["value"] == SERIES_METADATA_PARSER_VERSION:
-            return 0
-
-        before = connection.total_changes
-        connection.execute(
-            """
-            UPDATE series_status
-            SET metadata_checked_at = NULL
-            WHERE unavailable_at IS NULL
-            """
-        )
-        changes = connection.total_changes - before
-        connection.execute(
-            """
-            INSERT INTO metadata (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (SERIES_METADATA_PARSER_KEY, SERIES_METADATA_PARSER_VERSION),
-        )
-    return changes
+    return metadata_store.prepare_series_metadata_refresh(
+        connect_db,
+        SERIES_METADATA_PARSER_KEY,
+        SERIES_METADATA_PARSER_VERSION,
+    )
 
 
 def save_sync_checkpoint(checkpoint: dict[str, Any]) -> None:
