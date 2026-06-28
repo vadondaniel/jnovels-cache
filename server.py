@@ -1,73 +1,57 @@
 from __future__ import annotations
 
-import argparse
 import html
 import hashlib
 import json
 import re
 import sqlite3
+import sys
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import webbrowser
 from contextlib import contextmanager
-from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 from http import HTTPStatus
-from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-
-ROOT = Path(__file__).resolve().parent
-STATIC_DIR = ROOT / "static"
-DB_PATH = ROOT / "jnovels_cache.db"
-BASE_URL = "https://jnovels.com"
-USER_AGENT = "JNovelsCache/1.0 (+local personal metadata cache)"
-DEFAULT_PAGE_SIZE = 24
-MAX_PAGE_SIZE = 100
-AUTO_REPAIR_LIMIT = 20
-AUTO_REPAIR_MAX_ATTEMPTS = 3
-AUTO_SERIES_REFRESH_LIMIT = 5
-AUTO_SERIES_INDEX_LIMIT = 3
-AUTO_SYNC_COOLDOWN_SECONDS = 10 * 60
-SERIES_STALE_DAYS = 30
-SERIES_INDEX_REFRESH_HOURS = 24
-SYNC_CHECKPOINT_KEY = "active_sync"
-LEGACY_REPARSE_KEY = "legacy_format_reparse_v1"
-LEGACY_VOLUME_RECONCILE_KEY = "legacy_volume_reconcile_v1"
-CATALOG_RECONCILE_KEY = "catalog_reconcile_v7"
-SERIES_METADATA_PARSER_KEY = "series_metadata_parser_version"
-SERIES_METADATA_PARSER_VERSION = "9"
-SERIES_INDEX_URL = f"{BASE_URL}/light-novel-epub-jp/"
-SERIES_INDEX_REFRESH_KEY = "series_index_last_checked_at"
-EXCLUDED_SEARCH_PATHS = {
-    "/light-novel-epub-jp/",
-    "/top-light-novels-to-read/",
-}
-SERIES_RELEASE_GROUP_OVERRIDES = {
-    "https://jnovels.com/no-game-no-life-all-volumes-epub": "Official translation",
-    "https://jnovels.com/classroom-of-the-elite-light-novel-all-volumes-epub": (
-        "Official translation"
-    ),
-}
-PARTIAL_GROUP_PRESERVE_SERIES = {
-    "https://jnovels.com/download-eiyuu-kyoushitsu-epub",
-}
-MERGED_CATALOG_GROUP_OVERRIDES = {
-    "https://jnovels.com/download-eiyuu-kyoushitsu-epub": (
-        "Official translation",
-        "Fan translation",
-    ),
-}
-SAO_INDEX_URL = "https://jnovels.com/download-sword-art-online-light-novel-epub/"
-SHARED_INDEX_SUBSERIES = {
-    "sword art online progressive": SAO_INDEX_URL,
-    "sword art online alternative gun gale online": SAO_INDEX_URL,
-}
+from app_runner import run_app
+from config import (
+    AUTO_REPAIR_LIMIT,
+    AUTO_REPAIR_MAX_ATTEMPTS,
+    AUTO_SERIES_INDEX_LIMIT,
+    AUTO_SERIES_REFRESH_LIMIT,
+    AUTO_SYNC_COOLDOWN_SECONDS,
+    BASE_URL,
+    CATALOG_RECONCILE_KEY,
+    DB_PATH,
+    DEFAULT_PAGE_SIZE,
+    EXCLUDED_SEARCH_PATHS,
+    LEGACY_REPARSE_KEY,
+    LEGACY_VOLUME_RECONCILE_KEY,
+    MAX_PAGE_SIZE,
+    MERGED_CATALOG_GROUP_OVERRIDES,
+    PARTIAL_GROUP_PRESERVE_SERIES,
+    ROOT,
+    SAO_INDEX_URL,
+    SERIES_INDEX_REFRESH_HOURS,
+    SERIES_INDEX_REFRESH_KEY,
+    SERIES_INDEX_URL,
+    SERIES_METADATA_PARSER_KEY,
+    SERIES_METADATA_PARSER_VERSION,
+    SERIES_RELEASE_GROUP_OVERRIDES,
+    SERIES_STALE_DAYS,
+    SHARED_INDEX_SUBSERIES,
+    STATIC_DIR,
+    SYNC_CHECKPOINT_KEY,
+    USER_AGENT,
+)
+from models import Book, PostDetails, SeriesVolume
+from search_results import SearchResultsParser, normalize_date
+from web_handlers import create_app_handler
 
 _catalog_index_lock = threading.Lock()
 _catalog_index_cache: tuple[
@@ -89,40 +73,6 @@ def parse_positive_int(value: str, default: int) -> int:
         return max(int(value), 1)
     except (TypeError, ValueError):
         return default
-
-
-@dataclass
-class Book:
-    title: str
-    url: str
-    image_url: str | None
-    published_at: str | None
-    entry_type: str | None = None
-    original_post_url: str | None = None
-    download_url: str | None = None
-    detail_cached_at: str | None = None
-
-
-@dataclass
-class PostDetails:
-    entry_type: str
-    original_post_url: str | None
-    download_url: str | None
-    volumes: list["SeriesVolume"] = field(default_factory=list)
-    associated_names: list[str] = field(default_factory=list)
-    genres: list[str] = field(default_factory=list)
-    synopsis: str | None = None
-    parent_hints: list[str] = field(default_factory=list)
-    subseries_volumes: dict[str, list["SeriesVolume"]] = field(default_factory=dict)
-
-
-@dataclass
-class SeriesVolume:
-    label: str
-    download_url: str
-    position: int
-    release_group: str | None = None
-    source_list: int = field(default=0, compare=False, repr=False)
 
 
 def release_group_from_heading(text: str) -> str | None:
@@ -1232,106 +1182,6 @@ class PostDetailsParser(HTMLParser):
             self._parent_hints,
             subseries_volumes,
         )
-
-
-class SearchResultsParser(HTMLParser):
-    def __init__(self) -> None:
-        super().__init__(convert_charrefs=True)
-        self.books: list[Book] = []
-        self._article_depth = 0
-        self._in_title = False
-        self._in_date = False
-        self._in_featured = False
-        self._title_parts: list[str] = []
-        self._url: str | None = None
-        self._image_url: str | None = None
-        self._date_parts: list[str] = []
-
-    @staticmethod
-    def _classes(attrs: dict[str, str | None]) -> set[str]:
-        return set((attrs.get("class") or "").split())
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        attributes = dict(attrs)
-        classes = self._classes(attributes)
-
-        if tag == "article":
-            if self._article_depth == 0:
-                self._reset_article()
-            self._article_depth += 1
-            return
-
-        if self._article_depth == 0:
-            return
-
-        if tag == "div" and "featured-media" in classes:
-            self._in_featured = True
-        elif tag in {"h1", "h2"} and "post-title" in classes:
-            self._in_title = True
-        elif tag == "a" and self._in_title and not self._url:
-            self._url = attributes.get("href")
-        elif tag == "a" and "post-date" in classes:
-            self._in_date = True
-        elif tag == "img" and self._in_featured and not self._image_url:
-            self._image_url = attributes.get("src") or attributes.get("data-src")
-
-    def handle_endtag(self, tag: str) -> None:
-        if self._article_depth == 0:
-            return
-
-        if tag in {"h1", "h2"} and self._in_title:
-            self._in_title = False
-        elif tag == "a" and self._in_date:
-            self._in_date = False
-        elif tag == "div" and self._in_featured:
-            self._in_featured = False
-        elif tag == "article":
-            self._article_depth -= 1
-            if self._article_depth == 0:
-                self._finish_article()
-
-    def handle_data(self, data: str) -> None:
-        if self._in_title:
-            self._title_parts.append(data)
-        if self._in_date:
-            self._date_parts.append(data)
-
-    def _reset_article(self) -> None:
-        self._in_title = False
-        self._in_date = False
-        self._in_featured = False
-        self._title_parts = []
-        self._url = None
-        self._image_url = None
-        self._date_parts = []
-
-    def _finish_article(self) -> None:
-        title = " ".join("".join(self._title_parts).split())
-        if not title or not self._url:
-            return
-        if urllib.parse.urlparse(self._url).path in EXCLUDED_SEARCH_PATHS:
-            return
-
-        raw_date = " ".join("".join(self._date_parts).split())
-        self.books.append(
-            Book(
-                title=html.unescape(title),
-                url=self._url,
-                image_url=self._image_url,
-                published_at=normalize_date(raw_date),
-            )
-        )
-
-
-def normalize_date(value: str) -> str | None:
-    if not value:
-        return None
-    for fmt in ("%B %d, %Y", "%b %d, %Y"):
-        try:
-            return datetime.strptime(value, fmt).date().isoformat()
-        except ValueError:
-            pass
-    return value
 
 
 def is_external_http_url(value: str) -> bool:
@@ -6344,285 +6194,11 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     return filter_pdf_rows_when_epub_exists(rows)
 
 
-class AppHandler(SimpleHTTPRequestHandler):
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, directory=str(STATIC_DIR), **kwargs)
-
-    def do_GET(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/books":
-            params = urllib.parse.parse_qs(parsed.query)
-            query = params.get("q", [""])[0].strip()
-            exact_url = params.get("entry_url", [""])[0].strip() or None
-            sort = params.get("sort", ["published_desc"])[0]
-            entry_filter = params.get("filter", ["all"])[0].strip().casefold()
-            if entry_filter not in {
-                "all",
-                "series",
-                "volumes",
-                "pending",
-                "favorites",
-                "hidden",
-            }:
-                entry_filter = "all"
-            filter_counts = count_book_filters()
-            page = parse_positive_int(params.get("page", ["1"])[0], 1)
-            page_size = min(
-                parse_positive_int(
-                    params.get("page_size", [str(DEFAULT_PAGE_SIZE)])[0],
-                    DEFAULT_PAGE_SIZE,
-                ),
-                MAX_PAGE_SIZE,
-            )
-            count = count_books(query, entry_filter, exact_url)
-            pages = max(1, (count + page_size - 1) // page_size)
-            page = min(page, pages)
-            books = list_books(
-                query,
-                sort,
-                page_size,
-                (page - 1) * page_size,
-                entry_filter,
-                exact_url,
-            )
-            self.send_json(
-                {
-                    "books": books,
-                    "count": count,
-                    "page": page,
-                    "page_size": page_size,
-                    "pages": pages,
-                    "filter": entry_filter,
-                    "filter_counts": filter_counts,
-                }
-            )
-            return
-        if parsed.path == "/api/status":
-            with connect_db() as connection:
-                count = connection.execute("SELECT COUNT(*) FROM books").fetchone()[0]
-                metadata = get_public_metadata(connection=connection)
-                health = get_cache_health(connection=connection)
-            self.send_json(
-                {
-                    "sync": dict(sync_state),
-                    "count": count,
-                    "metadata": metadata,
-                    "health": health,
-                }
-            )
-            return
-        if parsed.path == "/api/repair-failures":
-            failures = list_repair_failures()
-            self.send_json({"failures": failures, "count": len(failures)})
-            return
-        if parsed.path == "/api/series":
-            params = urllib.parse.parse_qs(parsed.query)
-            series_url = params.get("url", [""])[0].strip()
-            if not series_url:
-                self.send_json({"error": "Missing series URL."}, HTTPStatus.BAD_REQUEST)
-                return
-            volumes = list_series_volumes(series_url)
-            counted_volumes = sum(
-                is_counted_catalog_volume(
-                    volume["label"],
-                    volume["download_url"],
-                )
-                for volume in volumes
-            )
-            self.send_json(
-                {
-                    "series_url": series_url,
-                    "volumes": volumes,
-                    "count": counted_volumes,
-                }
-            )
-            return
-        if parsed.path == "/":
-            self.path = "/index.html"
-        super().do_GET()
-
-    def do_POST(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        if parsed.path not in {
-            "/api/sync",
-            "/api/repair-entry",
-            "/api/series-preference",
-            "/api/refresh-series",
-        }:
-            self.send_error(HTTPStatus.NOT_FOUND)
-            return
-        try:
-            payload = self.read_json()
-            if parsed.path == "/api/series-preference":
-                series_url = str(payload.get("series_url", "")).strip()
-                if not series_url or not is_cached_series_url(series_url):
-                    self.send_json(
-                        {"error": "Cached series not found."},
-                        HTTPStatus.NOT_FOUND,
-                    )
-                    return
-                favorite_value = payload.get("favorite")
-                hidden_value = payload.get("hidden")
-                if favorite_value is not None and not isinstance(favorite_value, bool):
-                    raise ValueError("Invalid favorite preference")
-                if hidden_value is not None and not isinstance(hidden_value, bool):
-                    raise ValueError("Invalid hidden preference")
-                if favorite_value is None and hidden_value is None:
-                    raise ValueError("Missing preference")
-                preference = set_series_preference(
-                    series_url,
-                    favorite=favorite_value,
-                    hidden=hidden_value,
-                )
-                self.send_json(preference)
-                return
-
-            if parsed.path == "/api/refresh-series":
-                series_url = str(payload.get("series_url", "")).strip()
-                delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
-                if not series_url or not is_cached_series_url(series_url):
-                    self.send_json(
-                        {"error": "Cached series not found."},
-                        HTTPStatus.NOT_FOUND,
-                    )
-                    return
-                started = start_sync_thread(
-                    1,
-                    1,
-                    delay,
-                    "series_refresh",
-                    series_urls_override=[series_url],
-                    name="jnovels-refresh-series",
-                )
-                if not started:
-                    self.send_json(
-                        {"error": "A sync is already running."},
-                        HTTPStatus.CONFLICT,
-                    )
-                    return
-                self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
-                return
-
-            if parsed.path == "/api/repair-entry":
-                url = str(payload.get("url", "")).strip()
-                delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
-                if not url or not is_cached_book_url(url):
-                    self.send_json(
-                        {"error": "Cached entry not found."},
-                        HTTPStatus.NOT_FOUND,
-                    )
-                    return
-                started = start_sync_thread(
-                    1,
-                    1,
-                    delay,
-                    "repair",
-                    [url],
-                    name="jnovels-repair-entry",
-                )
-                if not started:
-                    self.send_json(
-                        {"error": "A sync is already running."},
-                        HTTPStatus.CONFLICT,
-                    )
-                    return
-                self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
-                return
-
-            mode = str(payload.get("mode", "catchup")).strip().casefold()
-            if mode not in {
-                "catchup",
-                "extend",
-                "manual",
-                "repair",
-                "series_refresh",
-                "series_discovery",
-            }:
-                raise ValueError("Unknown sync mode")
-            start_page = min(max(int(payload.get("start_page", 1)), 1), 10000)
-            max_limit = (
-                2000
-                if mode in {"repair", "series_refresh", "series_discovery"}
-                else 200
-            )
-            max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
-            delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
-            automatic = payload.get("automatic") is True
-        except (ValueError, TypeError, json.JSONDecodeError):
-            self.send_json({"error": "Invalid sync options."}, HTTPStatus.BAD_REQUEST)
-            return
-
-        if automatic:
-            if mode != "catchup":
-                self.send_json(
-                    {"error": "Automatic sync only supports catch-up mode."},
-                    HTTPStatus.BAD_REQUEST,
-                )
-                return
-            started, reason, retry_after = start_auto_catchup(max_pages, delay)
-            self.send_json(
-                {
-                    "ok": True,
-                    "started": started,
-                    "reason": reason,
-                    "retry_after": retry_after,
-                },
-                HTTPStatus.ACCEPTED,
-            )
-            return
-
-        if not start_sync_thread(start_page, max_pages, delay, mode):
-            self.send_json(
-                {"error": "A sync is already running."},
-                HTTPStatus.CONFLICT,
-            )
-            return
-        self.send_json({"ok": True}, HTTPStatus.ACCEPTED)
-
-    def read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("Content-Length", "0"))
-        if length == 0:
-            return {}
-        return json.loads(self.rfile.read(length).decode("utf-8"))
-
-    def send_json(self, payload: Any, status: HTTPStatus = HTTPStatus.OK) -> None:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "no-store")
-            self.end_headers()
-            self.wfile.write(data)
-        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
-            return
-
-    def log_message(self, format: str, *args: Any) -> None:
-        print(f"[{self.log_date_time_string()}] {format % args}")
+AppHandler = create_app_handler(sys.modules[__name__])
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Local JNovels EPUB search cache")
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--open", action="store_true", dest="open_browser")
-    args = parser.parse_args()
-
-    initialize_db()
-    server = ThreadingHTTPServer((args.host, args.port), AppHandler)
-    start_interrupted_sync_recovery()
-    url = f"http://{args.host}:{args.port}"
-    print(f"JNovels Cache is running at {url}")
-    print("Press Ctrl+C to stop.")
-    if args.open_browser:
-        threading.Timer(0.7, lambda: webbrowser.open(url)).start()
-
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\nStopping.")
-    finally:
-        server.server_close()
+    run_app(sys.modules[__name__])
 
 
 if __name__ == "__main__":
