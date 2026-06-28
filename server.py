@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import sqlite3
 import sys
@@ -9,15 +7,21 @@ import threading
 import time
 import urllib.error
 import urllib.parse
-import urllib.request
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
-from http import HTTPStatus
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from app_runner import run_app
-from label_utils import (
+from server_modules.web.app_runner import run_app
+from server_modules.storage import book_queries
+from server_modules.storage import book_repository
+from server_modules.storage import catalog_cache
+from server_modules.storage import cache_state
+from server_modules.storage import detail_queue
+from server_modules.storage import metadata_store
+from server_modules.storage import series_index_store
+from server_modules.normalization.label_utils import (
+    catalog_display_label,
     catalog_label_with_subtitle,
     compact_catalog_volume_badge,
     compact_volume_badge,
@@ -34,7 +38,14 @@ from label_utils import (
     prefer_catalog_volume_badge,
     roman_to_integer,
 )
-from config import (
+from server_modules.storage.db_schema import initialize_schema
+from server_modules.web.fetchers import (
+    fetch_page,
+    fetch_post_details,
+    fetch_series_index,
+    search_url,
+)
+from server_modules.config import (
     AUTO_REPAIR_LIMIT,
     AUTO_REPAIR_MAX_ATTEMPTS,
     AUTO_SERIES_INDEX_LIMIT,
@@ -64,9 +75,9 @@ from config import (
     SYNC_CHECKPOINT_KEY,
     USER_AGENT,
 )
-from models import Book, PostDetails, SeriesVolume
-from post_details import PostDetailsParser
-from release_groups import (
+from server_modules.domain.models import Book, PostDetails, SeriesVolume
+from server_modules.parsers.post_details import PostDetailsParser
+from server_modules.normalization.release_groups import (
     catalog_section_from_heading,
     default_catalog_section_from_url,
     format_release_family,
@@ -76,16 +87,30 @@ from release_groups import (
     release_group_from_catalog_text,
     release_group_from_heading,
 )
-from search_results import SearchResultsParser, normalize_date
-from series_index import SeriesIndexParser
-from text_utils import (
+from server_modules.parsers.search_results import SearchResultsParser, normalize_date
+from server_modules.parsers.series_index import SeriesIndexParser
+from server_modules.normalization.title_utils import (
+    book_duplicate_key,
+    book_page_format,
+    is_distinct_subseries_title,
+    is_named_subseries_title,
+    is_numbered_subseries_title,
+    normalize_display_title,
+    parent_hint_aliases,
+    parse_book_identity,
+    qualify_numbered_subseries_badge,
+    series_identity_key,
+    series_keys_are_related,
+    virtual_series_url,
+)
+from server_modules.normalization.text_utils import (
     decode_string_list,
     encode_string_list,
     normalize_legacy_title_case,
     normalize_synopsis,
     unique_nonempty_lines,
 )
-from url_utils import (
+from server_modules.normalization.url_utils import (
     canonical_page_url,
     is_counted_catalog_volume,
     is_external_http_url,
@@ -95,7 +120,86 @@ from url_utils import (
     is_legacy_download_url,
     is_legacy_forum_landing_url,
 )
-from web_handlers import create_app_handler
+from server_modules.web.handlers import create_app_handler
+
+__all__ = [
+    "AUTO_REPAIR_LIMIT",
+    "AUTO_REPAIR_MAX_ATTEMPTS",
+    "AUTO_SERIES_INDEX_LIMIT",
+    "AUTO_SERIES_REFRESH_LIMIT",
+    "AUTO_SYNC_COOLDOWN_SECONDS",
+    "BASE_URL",
+    "Book",
+    "CATALOG_RECONCILE_KEY",
+    "DB_PATH",
+    "DEFAULT_PAGE_SIZE",
+    "EXCLUDED_SEARCH_PATHS",
+    "LEGACY_REPARSE_KEY",
+    "LEGACY_VOLUME_RECONCILE_KEY",
+    "MAX_PAGE_SIZE",
+    "MERGED_CATALOG_GROUP_OVERRIDES",
+    "PARTIAL_GROUP_PRESERVE_SERIES",
+    "PostDetails",
+    "PostDetailsParser",
+    "ROOT",
+    "SAO_INDEX_URL",
+    "SERIES_INDEX_REFRESH_HOURS",
+    "SERIES_INDEX_REFRESH_KEY",
+    "SERIES_INDEX_URL",
+    "SERIES_METADATA_PARSER_KEY",
+    "SERIES_METADATA_PARSER_VERSION",
+    "SERIES_RELEASE_GROUP_OVERRIDES",
+    "SERIES_STALE_DAYS",
+    "SHARED_INDEX_SUBSERIES",
+    "STATIC_DIR",
+    "SYNC_CHECKPOINT_KEY",
+    "SearchResultsParser",
+    "SeriesIndexParser",
+    "SeriesVolume",
+    "USER_AGENT",
+    "catalog_display_label",
+    "catalog_label_with_subtitle",
+    "catalog_section_from_heading",
+    "compact_catalog_volume_badge",
+    "compact_volume_badge",
+    "default_catalog_section_from_url",
+    "prefer_catalog_volume_badge",
+    "is_distinct_subseries_title",
+    "format_release_family",
+    "decode_string_list",
+    "extract_catalog_label",
+    "extract_named_release_label",
+    "extract_sao_volume_label",
+    "extract_trailing_catalog_label",
+    "extract_volume_label",
+    "fetch_page",
+    "fetch_post_details",
+    "fetch_series_index",
+    "is_external_http_url",
+    "is_external_site_root",
+    "is_format_release_group",
+    "is_internal_related_catalog_url",
+    "is_legacy_download_url",
+    "is_legacy_forum_landing_url",
+    "is_named_subseries_title",
+    "is_numbered_subseries_title",
+    "is_volume_label",
+    "legacy_anchor_label",
+    "looks_like_download_text",
+    "normalize_date",
+    "normalize_display_title",
+    "normalize_legacy_title_case",
+    "normalize_synopsis",
+    "normalize_volume_designator",
+    "normalize_volume_number",
+    "qualify_format_release_group",
+    "qualify_numbered_subseries_badge",
+    "release_group_from_catalog_text",
+    "release_group_from_heading",
+    "roman_to_integer",
+    "search_url",
+    "unique_nonempty_lines",
+]
 
 _catalog_index_lock = threading.Lock()
 _catalog_index_cache: tuple[
@@ -106,8 +210,6 @@ _catalog_index_cache: tuple[
     dict[str, int],
     dict[str, int],
 ] | None = None
-_book_filter_counts_lock = threading.Lock()
-_book_filter_counts_cache: tuple[Path, dict[str, int]] | None = None
 _books_fts_lock = threading.Lock()
 _books_fts_available: tuple[Path, bool] | None = None
 
@@ -117,29 +219,6 @@ def parse_positive_int(value: str, default: int) -> int:
         return max(int(value), 1)
     except (TypeError, ValueError):
         return default
-
-
-def row_value(row: Any, key: str) -> Any | None:
-    try:
-        return row[key]
-    except (KeyError, IndexError):
-        return None
-
-
-def filter_pdf_rows_when_epub_exists(rows: list[Any]) -> list[Any]:
-    epub_series = {
-        row_value(row, "series_url")
-        for row in rows
-        if release_group_format_kind(row["release_group"]) == "epub"
-    }
-    if not epub_series:
-        return rows
-    return [
-        row
-        for row in rows
-        if release_group_format_kind(row["release_group"]) != "pdf"
-        or row_value(row, "series_url") not in epub_series
-    ]
 
 
 def is_volume_range_badge(label: str | None) -> bool:
@@ -535,326 +614,6 @@ def merge_cached_aggregate_catalogs_into_parent(parent_url: str) -> int:
     return changes
 
 
-def catalog_display_label(
-    label: str,
-    series_title: str | None,
-    release_group: str | None,
-) -> str:
-    if not series_title or (release_group or "").casefold() != "side stories":
-        return label
-    stripped = re.sub(
-        rf"^{re.escape(series_title)}\s*[-–—:]\s*",
-        "",
-        label,
-        flags=re.IGNORECASE,
-    ).strip()
-    return stripped or label
-
-
-
-
-
-
-def normalize_display_title(value: str) -> str:
-    has_pdf = bool(
-        re.search(r"\[PDF\]", value, re.IGNORECASE)
-        or re.search(r"\sPDF\s*$", value, re.IGNORECASE)
-    )
-    has_epub = bool(
-        re.search(r"\[EPUB\]", value, re.IGNORECASE)
-        or re.search(r"\sEPUB\s*$", value, re.IGNORECASE)
-    )
-    cleaned = re.sub(
-        r"^(?:\s*\[(?:WEB\s*NOVEL|WEBNOVEL|PDF|EPUB)\]\s*)+",
-        "",
-        value,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"^\s*DOWNLOAD\s+", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(
-        r"(?:\s+(?:PDF|EPUB))+\s*$",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"\s+ALL\s+(?:(?:LN|LIGHT\s+NOVEL)\s+)?VOLUMES?\s*$",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = normalize_legacy_title_case(" ".join(cleaned.split()))
-    if has_pdf and not has_epub:
-        cleaned = f"{cleaned} PDF"
-    return cleaned
-
-
-def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
-    cleaned = normalize_display_title(title)
-    cleaned = re.sub(r"\s+Epub$", "", cleaned, flags=re.IGNORECASE).strip()
-    cleaned = re.sub(
-        r"\s+Epub(?=\s+(?:Canto|Part|Act)\s+(?:[0-9]+|[IVX]+)\s*$)",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    matches = list(
-        re.finditer(
-            r"\s+(?:Volume|Vol\.?)\s*"
-            r"(Zero|[0-9]+(?:\.[0-9]+)?(?:\s*[-–—]\s*[0-9]+(?:\.[0-9]+)?)?)\b",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-    )
-    match = matches[-1] if matches else None
-    if match:
-        suffix = cleaned[match.end() :]
-        has_pdf_suffix = bool(re.search(r"\bPDF\s*$", suffix, re.IGNORECASE))
-        series_title = cleaned[: match.start()].rstrip(" ,:;.-–—…")
-        if has_pdf_suffix:
-            series_title = f"{series_title} PDF"
-        return series_title, compact_volume_badge(match.group(1), suffix)
-
-    legacy_number = re.search(
-        r"\s+([0-9]+(?:\.[0-9]+)?)_\s*[^/]+$",
-        cleaned,
-        re.IGNORECASE,
-    )
-    legacy_slug = re.search(
-        r"-([0-9]+(?:\.[0-9]+)?)_-(?:[^/]+-)?(?:epub|pdf)/?$",
-        urllib.parse.urlparse(url).path,
-        re.IGNORECASE,
-    )
-    if legacy_number and legacy_slug and legacy_number.group(1) == legacy_slug.group(1):
-        return (
-            cleaned[: legacy_number.start()].rstrip(" ,:;.-–—…"),
-            f"Vol. {normalize_volume_number(legacy_number.group(1))}",
-        )
-
-    standalone_part = re.search(
-        r"\s+Part\s+([0-9]+(?:\.[0-9]+)?)(?:\s+PDF)?$",
-        cleaned,
-        re.IGNORECASE,
-    )
-    if standalone_part:
-        return (
-            cleaned[: standalone_part.start()].rstrip(" ,:;.-–—…"),
-            f"Part {normalize_volume_number(standalone_part.group(1))}",
-        )
-
-    bare_number = re.search(
-        r"\s+([0-9]+(?:\.[0-9]+)?)(?:\s+(PDF))?$",
-        cleaned,
-        re.IGNORECASE,
-    )
-    bare_slug = re.search(
-        r"-([0-9]+(?:\.[0-9]+)?)-(?:epub|pdf)/?$",
-        urllib.parse.urlparse(url).path,
-        re.IGNORECASE,
-    )
-    if (
-        bare_number
-        and bare_slug
-        and normalize_volume_number(bare_number.group(1))
-        == normalize_volume_number(bare_slug.group(1))
-    ):
-        series_title = cleaned[: bare_number.start()].rstrip(" ,:;.-–—…")
-        series_title = re.sub(
-            r"\s+Light\s+Novel$",
-            "",
-            series_title,
-            flags=re.IGNORECASE,
-        )
-        if bare_number.group(2):
-            series_title = f"{series_title} PDF"
-        return series_title, f"Vol. {normalize_volume_number(bare_number.group(1))}"
-
-    slug_match = re.search(
-        r"-volume-([0-9]+(?:\.[0-9]+)?)(?:-light-novel)?-(?:epub|pdf)/?$",
-        urllib.parse.urlparse(url).path,
-        flags=re.IGNORECASE,
-    )
-    if slug_match:
-        return (
-            cleaned.rstrip(" .…"),
-            f"Vol. {normalize_volume_number(slug_match.group(1))}",
-        )
-
-    series_title = re.sub(
-        r"\s+Light\s+Novel$",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    ).rstrip(" .…")
-    return series_title, None
-
-
-def series_identity_key(title: str | None, url: str) -> str:
-    if title:
-        series_title, _ = parse_book_identity(title, url)
-        value = series_title
-    else:
-        value = urllib.parse.unquote(urllib.parse.urlparse(url).path.strip("/"))
-        value = value.replace("-", " ")
-        value = re.sub(
-            r"\bvolume\s+[0-9]+(?:\.[0-9]+)?\b.*$",
-            "",
-            value,
-            flags=re.IGNORECASE,
-        )
-    value = re.sub(r"^\s*download\s+", "", value, flags=re.IGNORECASE)
-    value = re.sub(
-        r"\b(?:all\s+volumes?|light\s+novels?|epubs?|pdfs?)\b",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
-    value = re.sub(
-        r"\b(?:volume|vol\.?)\s*[0-9]+(?:\.[0-9]+)?\b.*$",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
-    value = re.sub(
-        r"\b(?:part|year)\s+[0-9]+\s*$",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
-    return " ".join(re.findall(r"[a-z0-9]+", value.casefold()))
-
-
-def virtual_series_url(identity_key: str) -> str:
-    slug = "-".join(re.findall(r"[a-z0-9]+", identity_key.casefold()))
-    return f"virtual://jnovels/{slug}"
-
-
-def book_page_format(title: str, url: str) -> str | None:
-    value = f"{title} {urllib.parse.urlparse(url).path}".casefold()
-    has_pdf = bool(
-        "[pdf]" in value
-        or re.search(r"(?:\s|-)pdf(?:/)?$", value)
-        or "pdfepub" in value
-    )
-    has_epub = bool(
-        "[epub]" in value
-        or re.search(r"(?:\s|-)epub(?:/)?$", value)
-        or "pdfepub" in value
-    )
-    if has_pdf and has_epub:
-        return "mixed"
-    if has_pdf:
-        return "pdf"
-    if has_epub:
-        return "epub"
-    return None
-
-
-def book_duplicate_key(title: str, url: str) -> tuple[str, str]:
-    _, volume_label = parse_book_identity(title, url)
-    return series_identity_key(title, url), (volume_label or "").casefold()
-
-
-def series_keys_are_related(first: str, second: str) -> bool:
-    if not first or not second:
-        return False
-    if first == second:
-        return True
-    shorter, longer = sorted((first, second), key=len)
-    return len(shorter.split()) >= 2 and longer.startswith(f"{shorter} ")
-
-
-def is_numbered_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    parent_key = " ".join(re.findall(r"[a-z0-9]+", parent_title.casefold()))
-    candidate_key = " ".join(re.findall(r"[a-z0-9]+", candidate_title.casefold()))
-    if not parent_key or not candidate_key.startswith(f"{parent_key} "):
-        return False
-    suffix = candidate_key[len(parent_key) :].strip()
-    return bool(
-        re.fullmatch(
-            r"(?:year|part|season|arc)\s+[0-9]+(?:\s+(?:part|arc)\s+[0-9]+)?",
-            suffix,
-        )
-    )
-
-
-def is_named_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    parent_key = series_identity_key(parent_title, "")
-    candidate_key = series_identity_key(candidate_title, "")
-    if not parent_key or not candidate_key.startswith(f"{parent_key} "):
-        return False
-    suffix = candidate_key[len(parent_key) :].strip()
-    return bool(
-        re.match(
-            r"(?:progressive|alternative\b|short stor(?:y|ies)\b|side stor(?:y|ies)\b|"
-            r"zero\b|ex\b|gaiden\b)",
-            suffix,
-        )
-    )
-
-
-def is_distinct_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    return is_numbered_subseries_title(
-        parent_title,
-        candidate_title,
-    ) or is_named_subseries_title(parent_title, candidate_title)
-
-
-def qualify_numbered_subseries_badge(
-    title: str,
-    volume_label: str | None,
-) -> str | None:
-    if not volume_label:
-        return None
-    match = re.search(
-        r"\b(year|part|season|arc)\s+([0-9]+)\b"
-        r".*?\b(?:volume|vol\.?)\s*[0-9]",
-        title,
-        re.IGNORECASE,
-    )
-    if not match:
-        return volume_label
-    prefixes = {
-        "year": "Yr.",
-        "part": "Pt.",
-        "season": "S.",
-        "arc": "Arc",
-    }
-    prefix = prefixes[match.group(1).casefold()]
-    catalog_volume = re.search(
-        r"\b(?:volume|vol\.?)\s*([0-9]+(?:\.[0-9]+)?)",
-        volume_label,
-        re.IGNORECASE,
-    )
-    if catalog_volume:
-        volume_label = f"Vol. {normalize_volume_number(catalog_volume.group(1))}"
-    return f"{prefix} {match.group(2)} · {volume_label}"
-
-
-def parent_hint_aliases(hints: list[str], url: str) -> list[tuple[str, str]]:
-    aliases: list[tuple[str, str]] = []
-    seen: set[str] = set()
-    for hint in hints:
-        for segment in re.split(r"[()]", hint):
-            cleaned = re.sub(
-                r"^.*?\b(?:download|read)\s+",
-                "",
-                segment.strip(),
-                flags=re.IGNORECASE,
-            )
-            title, volume_label = parse_book_identity(cleaned, url)
-            key = series_identity_key(cleaned, url)
-            if (
-                not volume_label
-                or len(key.split()) < 2
-                or key in seen
-            ):
-                continue
-            seen.add(key)
-            aliases.append((title, key))
-    return aliases
-
-
 def delete_book_urls(
     connection: sqlite3.Connection,
     urls: set[str],
@@ -923,17 +682,50 @@ def prune_pdf_duplicates(
         return prune(active_connection)
 
 
-def invalidate_catalog_indexes() -> None:
-    global _catalog_index_cache
-    with _catalog_index_lock:
-        _catalog_index_cache = None
-    invalidate_book_filter_counts()
+def _configure_catalog_cache() -> None:
+    catalog_cache.configure(
+        db_path=DB_PATH,
+        connect_db=connect_db,
+        invalidate_book_filter_counts=book_queries.invalidate_book_filter_counts,
+    )
 
 
 def invalidate_book_filter_counts() -> None:
-    global _book_filter_counts_cache
-    with _book_filter_counts_lock:
-        _book_filter_counts_cache = None
+    book_queries.invalidate_book_filter_counts()
+
+
+def row_value(row: Any, key: str) -> Any | None:
+    return catalog_cache.row_value(row, key)
+
+
+def filter_pdf_rows_when_epub_exists(rows: list[Any]) -> list[Any]:
+    return catalog_cache.filter_pdf_rows_when_epub_exists(rows)
+
+
+def invalidate_catalog_indexes() -> None:
+    _configure_catalog_cache()
+    catalog_cache.invalidate_catalog_indexes()
+
+
+def get_catalog_indexes() -> tuple[
+    dict[str, tuple[str, int]],
+    dict[str, tuple[str, int]],
+    dict[str, int],
+    dict[str, int],
+    dict[str, int],
+]:
+    _configure_catalog_cache()
+    return catalog_cache.get_catalog_indexes()
+
+
+def get_series_catalog_index() -> dict[str, tuple[str, int]]:
+    _configure_catalog_cache()
+    return catalog_cache.get_series_catalog_index()
+
+
+def get_download_catalog_index() -> dict[str, tuple[str, int]]:
+    _configure_catalog_cache()
+    return catalog_cache.get_download_catalog_index()
 
 
 def set_books_fts_available(available: bool) -> None:
@@ -949,184 +741,6 @@ def books_fts_available() -> bool:
             and _books_fts_available[0] == DB_PATH
             and _books_fts_available[1]
         )
-
-
-def initialize_books_fts(connection: sqlite3.Connection) -> bool:
-    try:
-        connection.executescript(
-            """
-            CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
-                title,
-                associated_names,
-                content='books',
-                content_rowid='id',
-                tokenize='unicode61'
-            );
-
-            CREATE TRIGGER IF NOT EXISTS books_fts_ai
-            AFTER INSERT ON books BEGIN
-                INSERT INTO books_fts(rowid, title, associated_names)
-                VALUES (new.id, new.title, COALESCE(new.associated_names, ''));
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS books_fts_ad
-            AFTER DELETE ON books BEGIN
-                INSERT INTO books_fts(books_fts, rowid, title, associated_names)
-                VALUES (
-                    'delete',
-                    old.id,
-                    old.title,
-                    COALESCE(old.associated_names, '')
-                );
-            END;
-
-            CREATE TRIGGER IF NOT EXISTS books_fts_au
-            AFTER UPDATE OF title, associated_names ON books BEGIN
-                INSERT INTO books_fts(books_fts, rowid, title, associated_names)
-                VALUES (
-                    'delete',
-                    old.id,
-                    old.title,
-                    COALESCE(old.associated_names, '')
-                );
-                INSERT INTO books_fts(rowid, title, associated_names)
-                VALUES (new.id, new.title, COALESCE(new.associated_names, ''));
-            END;
-            """
-        )
-        connection.execute("INSERT INTO books_fts(books_fts) VALUES ('rebuild')")
-    except sqlite3.OperationalError:
-        return False
-    return True
-
-
-def get_catalog_indexes() -> tuple[
-    dict[str, tuple[str, int]],
-    dict[str, tuple[str, int]],
-    dict[str, int],
-    dict[str, int],
-    dict[str, int],
-]:
-    global _catalog_index_cache
-    with _catalog_index_lock:
-        if (
-            _catalog_index_cache is not None
-            and _catalog_index_cache[0] == DB_PATH
-            and len(_catalog_index_cache) == 6
-        ):
-            return _catalog_index_cache[1:]
-
-        with connect_db() as connection:
-            rows = connection.execute(
-                """
-        SELECT sv.series_url,
-               sv.download_url,
-               sv.label,
-               sv.release_group,
-               sv.position,
-               counts.volume_count,
-               b.title
-                FROM series_volumes AS sv
-                JOIN (
-                    SELECT series_url,
-                           SUM(is_counted_catalog_volume(label, download_url)) AS volume_count
-                    FROM series_volumes
-                    GROUP BY series_url
-                ) AS counts ON counts.series_url = sv.series_url
-                LEFT JOIN books AS b ON b.url = sv.series_url
-                ORDER BY counts.volume_count DESC, sv.series_url, sv.position
-                """
-            ).fetchall()
-
-        rows = filter_pdf_rows_when_epub_exists(list(rows))
-        visible_volume_counts: dict[str, int] = {}
-        for row in rows:
-            if is_counted_catalog_volume(row["label"], row["download_url"]):
-                visible_volume_counts[row["series_url"]] = (
-                    visible_volume_counts.get(row["series_url"], 0) + 1
-                )
-
-        catalog_index: dict[str, tuple[str, int]] = {}
-        download_index: dict[str, tuple[str, int]] = {}
-        volume_counts: dict[str, int] = {}
-        category_labels: dict[tuple[str, str], set[str]] = {}
-        category_positions: dict[tuple[str, str], int] = {}
-        for row in rows:
-            candidate = (
-                row["series_url"],
-                visible_volume_counts.get(row["series_url"], 0),
-            )
-            volume_counts[row["series_url"]] = candidate[1]
-            key = series_identity_key(row["title"], row["series_url"])
-            if key and candidate[1] > catalog_index.get(key, ("", 0))[1]:
-                catalog_index[key] = candidate
-            download_index.setdefault(row["download_url"], candidate)
-            category_key = (
-                row["series_url"],
-                (row["release_group"] or "").casefold(),
-            )
-            if not is_internal_jnovels_url(row["download_url"]):
-                category_labels.setdefault(category_key, set()).add(
-                    row["label"].casefold()
-                )
-                category_positions[category_key] = min(
-                    row["position"],
-                    category_positions.get(category_key, row["position"]),
-                )
-
-        download_category_counts = {
-            row["download_url"]: len(
-                category_labels.get(
-                    (
-                        row["series_url"],
-                        (row["release_group"] or "").casefold(),
-                    ),
-                    set(),
-                )
-            )
-            for row in rows
-        }
-        primary_category_counts = {
-            series_url: len(category_labels[category_key])
-            for series_url, category_key in {
-                series_url: min(
-                    (
-                        key
-                        for key in category_labels
-                        if key[0] == series_url
-                    ),
-                    key=lambda key: category_positions.get(key, 0),
-                )
-                for series_url in volume_counts
-                if any(key[0] == series_url for key in category_labels)
-            }.items()
-        }
-
-        _catalog_index_cache = (
-            DB_PATH,
-            catalog_index,
-            download_index,
-            volume_counts,
-            download_category_counts,
-            primary_category_counts,
-        )
-        return (
-            catalog_index,
-            download_index,
-            volume_counts,
-            download_category_counts,
-            primary_category_counts,
-        )
-
-
-def get_series_catalog_index() -> dict[str, tuple[str, int]]:
-    catalog_index, _, _, _, _ = get_catalog_indexes()
-    return catalog_index
-
-
-def get_download_catalog_index() -> dict[str, tuple[str, int]]:
-    _, download_index, _, _, _ = get_catalog_indexes()
-    return download_index
 
 
 @contextmanager
@@ -1153,164 +767,7 @@ def connect_db() -> Iterator[sqlite3.Connection]:
 def initialize_db() -> None:
     invalidate_catalog_indexes()
     with connect_db() as connection:
-        connection.execute("PRAGMA journal_mode = WAL")
-        connection.execute("PRAGMA synchronous = NORMAL")
-        connection.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS books (
-                id INTEGER PRIMARY KEY,
-                title TEXT NOT NULL,
-                url TEXT NOT NULL UNIQUE,
-                image_url TEXT,
-                published_at TEXT,
-                cached_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                entry_type TEXT,
-                original_post_url TEXT,
-                download_url TEXT,
-                detail_cached_at TEXT,
-                detail_attempts INTEGER NOT NULL DEFAULT 0,
-                detail_last_attempt_at TEXT,
-                detail_last_error TEXT,
-                associated_names TEXT,
-                genres TEXT,
-                synopsis TEXT,
-                source_order INTEGER
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_books_title ON books(title);
-            CREATE INDEX IF NOT EXISTS idx_books_published ON books(published_at);
-
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS series_volumes (
-                id INTEGER PRIMARY KEY,
-                series_url TEXT NOT NULL,
-                label TEXT NOT NULL,
-                download_url TEXT NOT NULL,
-                position INTEGER NOT NULL,
-                cached_at TEXT NOT NULL,
-                release_group TEXT,
-                UNIQUE(series_url, download_url)
-            );
-
-            CREATE INDEX IF NOT EXISTS idx_series_volumes_url
-            ON series_volumes(series_url, position);
-
-            CREATE TABLE IF NOT EXISTS series_status (
-                series_url TEXT PRIMARY KEY,
-                checked_at TEXT NOT NULL,
-                metadata_checked_at TEXT,
-                unavailable_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS series_preferences (
-                series_url TEXT PRIMARY KEY,
-                favorite INTEGER NOT NULL DEFAULT 0,
-                hidden INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS series_index_entries (
-                url TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL,
-                active INTEGER NOT NULL DEFAULT 1
-            );
-            """
-        )
-        existing_columns = {
-            row["name"] for row in connection.execute("PRAGMA table_info(books)").fetchall()
-        }
-        migrations = {
-            "entry_type": "ALTER TABLE books ADD COLUMN entry_type TEXT",
-            "original_post_url": "ALTER TABLE books ADD COLUMN original_post_url TEXT",
-            "download_url": "ALTER TABLE books ADD COLUMN download_url TEXT",
-            "detail_cached_at": "ALTER TABLE books ADD COLUMN detail_cached_at TEXT",
-            "detail_attempts": "ALTER TABLE books ADD COLUMN detail_attempts INTEGER NOT NULL DEFAULT 0",
-            "detail_last_attempt_at": "ALTER TABLE books ADD COLUMN detail_last_attempt_at TEXT",
-            "detail_last_error": "ALTER TABLE books ADD COLUMN detail_last_error TEXT",
-            "associated_names": "ALTER TABLE books ADD COLUMN associated_names TEXT",
-            "genres": "ALTER TABLE books ADD COLUMN genres TEXT",
-            "synopsis": "ALTER TABLE books ADD COLUMN synopsis TEXT",
-            "source_order": "ALTER TABLE books ADD COLUMN source_order INTEGER",
-        }
-        for column, statement in migrations.items():
-            if column not in existing_columns:
-                connection.execute(statement)
-        volume_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(series_volumes)").fetchall()
-        }
-        if "release_group" not in volume_columns:
-            connection.execute(
-                "ALTER TABLE series_volumes ADD COLUMN release_group TEXT"
-            )
-        status_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(series_status)").fetchall()
-        }
-        if "metadata_checked_at" not in status_columns:
-            connection.execute(
-                "ALTER TABLE series_status ADD COLUMN metadata_checked_at TEXT"
-            )
-        if "unavailable_at" not in status_columns:
-            connection.execute(
-                "ALTER TABLE series_status ADD COLUMN unavailable_at TEXT"
-            )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_books_original_post_cached
-            ON books(original_post_url, cached_at)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_books_original_post_published
-            ON books(original_post_url, published_at DESC, id DESC)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_books_download_url
-            ON books(download_url)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_books_entry_type_published
-            ON books(entry_type, published_at DESC)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_series_preferences_flags
-            ON series_preferences(series_url, hidden, favorite)
-            """
-        )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_series_volumes_download
-            ON series_volumes(download_url, position)
-            """
-        )
-        set_books_fts_available(initialize_books_fts(connection))
-        connection.execute(
-            """
-            INSERT OR IGNORE INTO series_status (series_url, checked_at)
-            SELECT series_url, MAX(cached_at)
-            FROM series_volumes
-            GROUP BY series_url
-            """
-        )
-        connection.executemany(
-            "DELETE FROM books WHERE url = ?",
-            [(urllib.parse.urljoin(BASE_URL, path),) for path in EXCLUDED_SEARCH_PATHS],
-        )
+        set_books_fts_available(initialize_schema(connection))
     build_missing_fallback_catalogs()
     prepare_legacy_reparse()
     prepare_series_metadata_refresh()
@@ -1321,115 +778,36 @@ def initialize_db() -> None:
 
 
 def upsert_books(books: list[Book], source_page: int | None = None) -> int:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        existing_rows = connection.execute(
-            "SELECT title, url, original_post_url FROM books"
-        ).fetchall()
-        preferred_keys = {
-            book_duplicate_key(row["title"], row["url"])
-            for row in existing_rows
-            if book_page_format(row["title"], row["url"]) in {"epub", "mixed"}
-        }
-        preferred_keys.update(
-            book_duplicate_key(book.title, book.url)
-            for book in books
-            if book_page_format(book.title, book.url) in {"epub", "mixed"}
-        )
-        books = [
-            book
-            for book in books
-            if book_page_format(book.title, book.url) != "pdf"
-            or book_duplicate_key(book.title, book.url) not in preferred_keys
-        ]
-        before = connection.total_changes
-        connection.executemany(
-            """
-            INSERT INTO books (
-                title, url, image_url, published_at, cached_at, last_seen_at,
-                source_order
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                title = excluded.title,
-                image_url = excluded.image_url,
-                published_at = excluded.published_at,
-                last_seen_at = excluded.last_seen_at,
-                source_order = COALESCE(excluded.source_order, books.source_order)
-            """,
-            [
-                (
-                    book.title,
-                    book.url,
-                    book.image_url,
-                    book.published_at,
-                    now,
-                    now,
-                    source_page * 1000 + position if source_page is not None else None,
-                )
-                for position, book in enumerate(books)
-            ],
-        )
-        prune_pdf_duplicates(connection=connection)
-        changes = connection.total_changes - before
-    if changes:
-        invalidate_catalog_indexes()
-    return changes
+    return book_repository.upsert_books(
+        connect_db,
+        prune_pdf_duplicates,
+        invalidate_catalog_indexes,
+        books,
+        source_page,
+    )
 
 
 def set_metadata(key: str, value: str) -> None:
-    with connect_db() as connection:
-        connection.execute(
-            """
-            INSERT INTO metadata (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (key, value),
-        )
+    metadata_store.set_metadata(connect_db, key, value)
 
 
 def delete_metadata(key: str) -> None:
-    with connect_db() as connection:
-        connection.execute("DELETE FROM metadata WHERE key = ?", (key,))
+    metadata_store.delete_metadata(connect_db, key)
 
 
 def get_search_scan_frontier() -> int:
-    value = get_metadata().get("search_scan_frontier")
-    try:
-        return max(int(value or 0), 0)
-    except ValueError:
-        return 0
+    return metadata_store.get_search_scan_frontier(connect_db)
 
 
 def get_book_source_orders(urls: list[str]) -> dict[str, int]:
-    if not urls:
-        return {}
-    placeholders = ", ".join("?" for _ in urls)
-    with connect_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT url, source_order
-            FROM books
-            WHERE url IN ({placeholders})
-              AND source_order IS NOT NULL
-            """,
-            urls,
-        ).fetchall()
-    return {row["url"]: row["source_order"] for row in rows}
+    return metadata_store.get_book_source_orders(connect_db, urls)
 
 
 def observed_source_page_shift(
     current_page: int,
     source_orders: dict[str, int],
 ) -> int:
-    return max(
-        (
-            current_page - source_order // 1000
-            for source_order in source_orders.values()
-            if current_page > source_order // 1000
-        ),
-        default=0,
-    )
+    return metadata_store.observed_source_page_shift(current_page, source_orders)
 
 
 def apply_observed_front_shift(
@@ -1437,35 +815,34 @@ def apply_observed_front_shift(
     applied_shift: int,
     observed_shift: int,
 ) -> tuple[int, int]:
-    if observed_shift <= applied_shift:
-        return frontier, applied_shift
-    return frontier + observed_shift - applied_shift, observed_shift
+    return metadata_store.apply_observed_front_shift(
+        frontier,
+        applied_shift,
+        observed_shift,
+    )
 
 
 def get_metadata(
     *,
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, str]:
-    def load(active_connection: sqlite3.Connection) -> dict[str, str]:
-        rows = active_connection.execute("SELECT key, value FROM metadata").fetchall()
-        return {row["key"]: row["value"] for row in rows}
-
-    if connection is not None:
-        return load(connection)
-    with connect_db() as active_connection:
-        return load(active_connection)
+    return metadata_store.get_metadata(connect_db, connection=connection)
 
 
 def get_public_metadata(
     *,
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, str]:
-    metadata = get_metadata(connection=connection)
-    metadata.pop(SYNC_CHECKPOINT_KEY, None)
-    metadata.pop(LEGACY_REPARSE_KEY, None)
-    metadata.pop(LEGACY_VOLUME_RECONCILE_KEY, None)
-    metadata.pop(SERIES_METADATA_PARSER_KEY, None)
-    return metadata
+    return metadata_store.get_public_metadata(
+        connect_db,
+        hidden_keys={
+            SYNC_CHECKPOINT_KEY,
+            LEGACY_REPARSE_KEY,
+            LEGACY_VOLUME_RECONCILE_KEY,
+            SERIES_METADATA_PARSER_KEY,
+        },
+        connection=connection,
+    )
 
 
 def prepare_legacy_reparse() -> int:
@@ -1539,259 +916,62 @@ def prepare_series_metadata_refresh() -> int:
 
 
 def save_sync_checkpoint(checkpoint: dict[str, Any]) -> None:
-    set_metadata(SYNC_CHECKPOINT_KEY, json.dumps(checkpoint, ensure_ascii=False))
+    metadata_store.save_sync_checkpoint(connect_db, SYNC_CHECKPOINT_KEY, checkpoint)
 
 
 def load_sync_checkpoint() -> dict[str, Any] | None:
-    raw = get_metadata().get(SYNC_CHECKPOINT_KEY)
-    if not raw:
-        return None
-    try:
-        checkpoint = json.loads(raw)
-    except (TypeError, json.JSONDecodeError):
-        delete_metadata(SYNC_CHECKPOINT_KEY)
-        return None
-    return checkpoint if isinstance(checkpoint, dict) else None
+    return metadata_store.load_sync_checkpoint(connect_db, SYNC_CHECKPOINT_KEY)
 
 
 def clear_sync_checkpoint() -> None:
-    delete_metadata(SYNC_CHECKPOINT_KEY)
+    metadata_store.clear_sync_checkpoint(connect_db, SYNC_CHECKPOINT_KEY)
 
 
-def search_url(page: int) -> str:
-    if page <= 1:
-        return f"{BASE_URL}/?s=epub"
-    return f"{BASE_URL}/page/{page}/?s=epub"
-
-
-def fetch_page(page: int, timeout: int = 30) -> list[Book]:
-    request = urllib.request.Request(
-        search_url(page),
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.8",
-        },
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            charset = response.headers.get_content_charset() or "utf-8"
-            body = response.read().decode(charset, errors="replace")
-    except urllib.error.HTTPError as exc:
-        if exc.code == HTTPStatus.NOT_FOUND and page > 1:
-            return []
-        raise
-
-    parser = SearchResultsParser()
-    parser.feed(body)
-    return parser.books
-
-
-def fetch_series_index(timeout: int = 30) -> list[Book]:
-    request = urllib.request.Request(
-        SERIES_INDEX_URL,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.8",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        body = response.read().decode(charset, errors="replace")
-    parser = SeriesIndexParser(SERIES_INDEX_URL)
-    parser.feed(body)
-    if not parser.entries:
-        raise ValueError("The JNovels series index did not contain any entries.")
-    return parser.entries
 
 
 def store_series_index(entries: list[Book]) -> tuple[int, int]:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    canonical_entries = {
-        canonical_page_url(entry.url): entry.title
-        for entry in entries
-        if entry.title and entry.url
-    }
-    if not canonical_entries:
-        raise ValueError("The JNovels series index did not contain any entries.")
-    with connect_db() as connection:
-        existing_urls = {
-            row["url"]
-            for row in connection.execute(
-                "SELECT url FROM series_index_entries"
-            ).fetchall()
-        }
-        connection.execute("UPDATE series_index_entries SET active = 0")
-        connection.executemany(
-            """
-            INSERT INTO series_index_entries (
-                url, title, first_seen_at, last_seen_at, active
-            )
-            VALUES (?, ?, ?, ?, 1)
-            ON CONFLICT(url) DO UPDATE SET
-                title = excluded.title,
-                last_seen_at = excluded.last_seen_at,
-                active = 1
-            """,
-            [
-                (url, title, now, now)
-                for url, title in canonical_entries.items()
-            ],
-        )
-        connection.execute(
-            """
-            INSERT INTO metadata (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (SERIES_INDEX_REFRESH_KEY, now),
-        )
-    return len(canonical_entries), len(set(canonical_entries) - existing_urls)
+    return series_index_store.store_series_index(
+        connect_db,
+        SERIES_INDEX_REFRESH_KEY,
+        entries,
+    )
 
 
 def series_index_is_initialized() -> bool:
-    with connect_db() as connection:
-        return connection.execute(
-            "SELECT 1 FROM series_index_entries LIMIT 1"
-        ).fetchone() is not None
+    return series_index_store.series_index_is_initialized(connect_db)
 
 
 def series_index_refresh_due() -> bool:
-    raw = get_metadata().get(SERIES_INDEX_REFRESH_KEY)
-    if not raw:
-        return True
-    try:
-        checked_at = datetime.fromisoformat(raw)
-    except ValueError:
-        return True
-    if checked_at.tzinfo is None:
-        checked_at = checked_at.replace(tzinfo=timezone.utc)
-    return checked_at <= datetime.now(timezone.utc) - timedelta(
-        hours=SERIES_INDEX_REFRESH_HOURS
+    return series_index_store.series_index_refresh_due(
+        connect_db,
+        SERIES_INDEX_REFRESH_KEY,
+        SERIES_INDEX_REFRESH_HOURS,
     )
 
 
 def get_series_index_candidates(limit: int) -> list[Book]:
-    if limit <= 0:
-        return []
-    with connect_db() as connection:
-        index_rows = connection.execute(
-            """
-            SELECT title, url, first_seen_at
-            FROM series_index_entries
-            WHERE active = 1
-            """
-        ).fetchall()
-        book_rows = connection.execute(
-            "SELECT title, url, original_post_url FROM books"
-        ).fetchall()
-        volume_series_urls = {
-            canonical_page_url(row["series_url"])
-            for row in connection.execute(
-                "SELECT DISTINCT series_url FROM series_volumes"
-            ).fetchall()
-        }
-
-    cached_urls = volume_series_urls
-    cached_identity_keys: set[str] = set()
-    for row in book_rows:
-        cached_urls.add(canonical_page_url(row["url"]))
-        if row["original_post_url"]:
-            cached_urls.add(canonical_page_url(row["original_post_url"]))
-        key = series_identity_key(row["title"], row["url"])
-        if key:
-            cached_identity_keys.add(key)
-
-    candidates = [
-        (
-            series_identity_key(row["title"], row["url"]) in cached_identity_keys,
-            row["first_seen_at"],
-            row["title"].casefold(),
-            Book(row["title"], row["url"], None, None),
-        )
-        for row in index_rows
-        if canonical_page_url(row["url"]) not in cached_urls
-    ]
-    candidates.sort(key=lambda item: item[2])
-    candidates.sort(key=lambda item: item[1], reverse=True)
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    return [item[3] for item in candidates[:limit]]
+    return series_index_store.get_series_index_candidates(connect_db, limit)
 
 
 def count_missing_series_index_entries(
     *,
     connection: sqlite3.Connection | None = None,
 ) -> int:
-    def count(active_connection: sqlite3.Connection) -> int:
-        cached_urls = {
-            canonical_page_url(row["url"])
-            for row in active_connection.execute("SELECT url FROM books")
-        }
-        cached_urls.update(
-            canonical_page_url(row["original_post_url"])
-            for row in active_connection.execute(
-                """
-                SELECT DISTINCT original_post_url
-                FROM books
-                WHERE original_post_url IS NOT NULL
-                """
-            )
-        )
-        cached_urls.update(
-            canonical_page_url(row["series_url"])
-            for row in active_connection.execute(
-                "SELECT DISTINCT series_url FROM series_volumes"
-            )
-        )
-        return sum(
-            canonical_page_url(row["url"]) not in cached_urls
-            for row in active_connection.execute(
-                "SELECT url FROM series_index_entries WHERE active = 1"
-            )
-        )
-
-    if connection is not None:
-        return count(connection)
-    with connect_db() as active_connection:
-        return count(active_connection)
+    return series_index_store.count_missing_series_index_entries(
+        connect_db,
+        connection=connection,
+    )
 
 
 def add_series_index_candidates(books: list[Book]) -> list[str]:
-    if not books:
-        return []
-    upsert_books(books)
-    urls = [canonical_page_url(book.url) for book in books]
-    placeholders = ", ".join("?" for _ in urls)
-    with connect_db() as connection:
-        connection.execute(
-            f"""
-            UPDATE books
-            SET entry_type = 'series'
-            WHERE url IN ({placeholders})
-              AND detail_cached_at IS NULL
-            """,
-            urls,
-        )
-    invalidate_book_filter_counts()
-    return urls
-
-
-def fetch_post_details(url: str, timeout: int = 30) -> PostDetails:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "en-US,en;q=0.8",
-        },
+    return series_index_store.add_series_index_candidates(
+        connect_db,
+        upsert_books,
+        invalidate_book_filter_counts,
+        books,
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        charset = response.headers.get_content_charset() or "utf-8"
-        body = response.read().decode(charset, errors="replace")
 
-    parser = PostDetailsParser(url)
-    parser.feed(body)
-    return parser.details()
+
 
 
 def infer_series_parent(
@@ -3491,24 +2671,11 @@ def reconcile_series_downloads(series_url: str) -> int:
 
 
 def get_cached_urls() -> set[str]:
-    with connect_db() as connection:
-        rows = connection.execute("SELECT url FROM books").fetchall()
-    return {row["url"] for row in rows}
+    return detail_queue.get_cached_urls(connect_db)
 
 
 def record_detail_failure(url: str, error: Exception) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        connection.execute(
-            """
-            UPDATE books
-            SET detail_attempts = detail_attempts + 1,
-                detail_last_attempt_at = ?,
-                detail_last_error = ?
-            WHERE url = ?
-            """,
-            (now, str(error)[:500], url),
-        )
+    detail_queue.record_detail_failure(connect_db, url, error)
 
 
 def get_incomplete_detail_urls(
@@ -3517,163 +2684,45 @@ def get_incomplete_detail_urls(
     max_attempts: int | None = None,
     exclude_urls: set[str] | None = None,
 ) -> list[str]:
-    conditions = [
-        """
-        (
-            b.detail_cached_at IS NULL
-            OR b.entry_type IS NULL
-            OR b.download_url IS NULL
-        )
-        """
-    ]
-    params: list[Any] = []
-    if max_attempts is not None:
-        conditions.append("b.detail_attempts < ?")
-        params.append(max_attempts)
-    if exclude_urls:
-        placeholders = ", ".join("?" for _ in exclude_urls)
-        conditions.append(f"b.url NOT IN ({placeholders})")
-        params.extend(sorted(exclude_urls))
-    params.append(limit)
-
-    with connect_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT b.url
-            FROM books AS b
-            WHERE {" AND ".join(conditions)}
-            ORDER BY b.detail_last_attempt_at IS NOT NULL,
-                     b.detail_last_attempt_at,
-                     b.published_at DESC,
-                     b.id DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-    return [row["url"] for row in rows]
+    return detail_queue.get_incomplete_detail_urls(
+        connect_db,
+        limit,
+        max_attempts=max_attempts,
+        exclude_urls=exclude_urls,
+    )
 
 
 def get_cache_health(
     *,
     connection: sqlite3.Connection | None = None,
 ) -> dict[str, int]:
-    def load(active_connection: sqlite3.Connection) -> dict[str, int]:
-        pending = active_connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM books AS b
-            WHERE b.detail_cached_at IS NULL
-               OR b.entry_type IS NULL
-               OR b.download_url IS NULL
-            """
-        ).fetchone()[0]
-        paused = active_connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM books AS b
-            WHERE (
-                    b.detail_cached_at IS NULL
-                    OR b.entry_type IS NULL
-                    OR b.download_url IS NULL
-                  )
-              AND b.detail_attempts >= ?
-            """,
-            (AUTO_REPAIR_MAX_ATTEMPTS,),
-        ).fetchone()[0]
-        failed = active_connection.execute(
-            """
-            SELECT COUNT(*)
-            FROM books
-            WHERE detail_attempts > 0
-              AND detail_last_error IS NOT NULL
-            """
-        ).fetchone()[0]
-        stale_series = count_stale_series(connection=active_connection)
-        refreshable_series = active_connection.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM series_status AS ss
-            WHERE ss.unavailable_at IS NULL
-              AND (
-                    ss.metadata_checked_at IS NULL
-                    OR {stale_series_where_clause()}
-                  )
-            """,
-            (series_stale_cutoff(),),
-        ).fetchone()[0]
-        return {
-            "pending_details": pending,
-            "failed_retries": failed,
-            "paused_retries": paused,
-            "stale_series": stale_series,
-            "refreshable_series": refreshable_series,
-            "indexed_series_total": active_connection.execute(
-                "SELECT COUNT(*) FROM series_index_entries WHERE active = 1"
-            ).fetchone()[0],
-            "indexed_series_missing": count_missing_series_index_entries(
-                connection=active_connection
-            ),
-        }
-
-    if connection is not None:
-        return load(connection)
-    with connect_db() as active_connection:
-        return load(active_connection)
+    return cache_state.get_cache_health(
+        connect_db,
+        auto_repair_max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
+        stale_days=SERIES_STALE_DAYS,
+        count_missing_series_index_entries=count_missing_series_index_entries,
+        connection=connection,
+    )
 
 
 def series_stale_cutoff() -> str:
-    return (
-        datetime.now(timezone.utc) - timedelta(days=SERIES_STALE_DAYS)
-    ).isoformat(timespec="seconds")
+    return cache_state.series_stale_cutoff(SERIES_STALE_DAYS)
 
 
 def stale_series_where_clause() -> str:
-    return """
-        (
-            ss.unavailable_at IS NULL
-            AND (
-                ss.checked_at < ?
-                OR EXISTS (
-                    SELECT 1
-                    FROM books AS b
-                    WHERE b.original_post_url = ss.series_url
-                      AND b.cached_at > ss.checked_at
-                )
-            )
-        )
-    """
+    return cache_state.stale_series_where_clause()
 
 
 def count_stale_series(*, connection: sqlite3.Connection | None = None) -> int:
-    def count(active_connection: sqlite3.Connection) -> int:
-        return active_connection.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM series_status AS ss
-            WHERE {stale_series_where_clause()}
-            """,
-            (series_stale_cutoff(),),
-        ).fetchone()[0]
-
-    if connection is not None:
-        return count(connection)
-    with connect_db() as active_connection:
-        return count(active_connection)
+    return cache_state.count_stale_series(
+        connect_db,
+        SERIES_STALE_DAYS,
+        connection=connection,
+    )
 
 
 def get_stale_series_urls(limit: int) -> list[str]:
-    with connect_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT ss.series_url
-            FROM series_status AS ss
-            WHERE {stale_series_where_clause()}
-            ORDER BY ss.checked_at, ss.series_url
-            LIMIT ?
-            """,
-            (series_stale_cutoff(), limit),
-        ).fetchall()
-    return [row["series_url"] for row in rows]
+    return cache_state.get_stale_series_urls(connect_db, SERIES_STALE_DAYS, limit)
 
 
 def get_series_metadata_backfill_urls(
@@ -3681,86 +2730,31 @@ def get_series_metadata_backfill_urls(
     *,
     exclude_urls: set[str] | None = None,
 ) -> list[str]:
-    conditions = ["metadata_checked_at IS NULL", "unavailable_at IS NULL"]
-    params: list[Any] = []
-    if exclude_urls:
-        placeholders = ", ".join("?" for _ in exclude_urls)
-        conditions.append(f"series_url NOT IN ({placeholders})")
-        params.extend(sorted(exclude_urls))
-    params.append(limit)
-
-    with connect_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT series_url
-            FROM series_status
-            WHERE {" AND ".join(conditions)}
-            ORDER BY checked_at DESC, series_url
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
-    return [row["series_url"] for row in rows]
+    return cache_state.get_series_metadata_backfill_urls(
+        connect_db,
+        limit,
+        exclude_urls=exclude_urls,
+    )
 
 
 def get_series_refresh_urls(limit: int) -> list[str]:
-    urls = get_stale_series_urls(limit)
-    remaining = limit - len(urls)
-    if remaining > 0:
-        urls.extend(
-            get_series_metadata_backfill_urls(remaining, exclude_urls=set(urls))
-        )
-    return urls
+    return cache_state.get_series_refresh_urls(connect_db, SERIES_STALE_DAYS, limit)
 
 
 def list_repair_failures(limit: int = 100) -> list[dict[str, Any]]:
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT title, url, detail_attempts, detail_last_attempt_at, detail_last_error
-            FROM books
-            WHERE detail_attempts > 0
-              AND detail_last_error IS NOT NULL
-            ORDER BY detail_last_attempt_at DESC, id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    return [dict(row) for row in rows]
+    return cache_state.list_repair_failures(connect_db, limit)
 
 
 def is_cached_book_url(url: str) -> bool:
-    with connect_db() as connection:
-        return connection.execute(
-            "SELECT 1 FROM books WHERE url = ?",
-            (url,),
-        ).fetchone() is not None
+    return cache_state.is_cached_book_url(connect_db, url)
 
 
 def is_established_series_book(url: str) -> bool:
-    with connect_db() as connection:
-        return connection.execute(
-            "SELECT 1 FROM books WHERE url = ? AND entry_type = 'series'",
-            (url,),
-        ).fetchone() is not None
+    return cache_state.is_established_series_book(connect_db, url)
 
 
 def is_cached_series_url(url: str) -> bool:
-    with connect_db() as connection:
-        return connection.execute(
-            """
-            SELECT 1
-            FROM books
-            WHERE url = ?
-               OR original_post_url = ?
-            UNION
-            SELECT 1
-            FROM series_volumes
-            WHERE series_url = ?
-            LIMIT 1
-            """,
-            (url, url, url),
-        ).fetchone() is not None
+    return cache_state.is_cached_series_url(connect_db, url)
 
 
 def set_series_preference(
@@ -3769,81 +2763,18 @@ def set_series_preference(
     favorite: bool | None = None,
     hidden: bool | None = None,
 ) -> dict[str, Any]:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        current = connection.execute(
-            """
-            SELECT favorite, hidden
-            FROM series_preferences
-            WHERE series_url = ?
-            """,
-            (series_url,),
-        ).fetchone()
-        next_favorite = int(
-            favorite if favorite is not None else bool(current["favorite"]) if current else False
-        )
-        next_hidden = int(
-            hidden if hidden is not None else bool(current["hidden"]) if current else False
-        )
-        connection.execute(
-            """
-            INSERT INTO series_preferences
-                (series_url, favorite, hidden, updated_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(series_url) DO UPDATE SET
-                favorite = excluded.favorite,
-                hidden = excluded.hidden,
-                updated_at = excluded.updated_at
-            """,
-            (series_url, next_favorite, next_hidden, now),
-        )
+    preference = cache_state.set_series_preference(
+        connect_db,
+        series_url,
+        favorite=favorite,
+        hidden=hidden,
+    )
     invalidate_book_filter_counts()
-    return {
-        "series_url": series_url,
-        "favorite": bool(next_favorite),
-        "hidden": bool(next_hidden),
-    }
+    return preference
 
 
 def cache_content_signature() -> str:
-    digest = hashlib.sha256()
-    with connect_db() as connection:
-        book_rows = connection.execute(
-            """
-            SELECT title, url, image_url, published_at, entry_type,
-                   original_post_url, download_url, associated_names,
-                   genres, synopsis, source_order
-            FROM books
-            ORDER BY url
-            """
-        )
-        for row in book_rows:
-            digest.update(
-                json.dumps(
-                    list(row),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            digest.update(b"\n")
-
-        volume_rows = connection.execute(
-            """
-            SELECT series_url, label, download_url, position, release_group
-            FROM series_volumes
-            ORDER BY series_url, position, download_url
-            """
-        )
-        for row in volume_rows:
-            digest.update(
-                json.dumps(
-                    list(row),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            digest.update(b"\n")
-    return digest.hexdigest()
+    return cache_state.cache_content_signature(connect_db)
 
 
 sync_lock = threading.Lock()
@@ -4387,24 +3318,24 @@ def start_interrupted_sync_recovery() -> bool:
     return True
 
 
+def _configure_book_queries() -> None:
+    book_queries.configure(
+        db_path=DB_PATH,
+        connect_db=connect_db,
+        books_fts_available=books_fts_available,
+        get_catalog_indexes=get_catalog_indexes,
+        infer_aggregate_catalog_parents_from_db=infer_aggregate_catalog_parents_from_db,
+        infer_aggregate_catalog_parent_from_db=infer_aggregate_catalog_parent_from_db,
+        filter_pdf_rows_when_epub_exists=filter_pdf_rows_when_epub_exists,
+    )
+
+
 def parse_search_terms(query: str) -> list[str]:
-    terms: list[str] = []
-    for match in re.finditer(r'"([^"]+)"|([\w%\\]+)', query, flags=re.UNICODE):
-        quoted, unquoted = match.groups()
-        term = " ".join(quoted.split()) if quoted is not None else unquoted
-        if term:
-            terms.append(term)
-    return terms
+    return book_queries.parse_search_terms(query)
 
 
 def fts_query_for_term(term: str) -> str | None:
-    tokens = re.findall(r"\w+", term, flags=re.UNICODE)
-    if not tokens:
-        return None
-    escaped_tokens = [token.replace('"', '""') for token in tokens]
-    if len(escaped_tokens) == 1:
-        return f'"{escaped_tokens[0]}"'
-    return f'"{" ".join(escaped_tokens)}"'
+    return book_queries.fts_query_for_term(term)
 
 
 def book_fts_filter(
@@ -4412,51 +3343,11 @@ def book_fts_filter(
     *,
     include_family_titles: bool,
 ) -> tuple[str, tuple[str, ...]] | None:
-    fts_query = fts_query_for_term(term)
-    if not fts_query:
-        return None
-    conditions = [
-        """
-        books.id IN (
-            SELECT rowid
-            FROM books_fts
-            WHERE books_fts MATCH ?
-        )
-        """
-    ]
-    params = [fts_query]
-    if include_family_titles:
-        conditions.extend(
-            [
-                """
-                EXISTS (
-                    SELECT 1
-                    FROM books AS parent
-                    WHERE parent.url = books.original_post_url
-                      AND parent.id IN (
-                          SELECT rowid
-                          FROM books_fts
-                          WHERE books_fts MATCH ?
-                      )
-                )
-                """,
-                """
-                EXISTS (
-                    SELECT 1
-                    FROM books AS sibling
-                    WHERE sibling.original_post_url =
-                          COALESCE(books.original_post_url, books.url)
-                      AND sibling.id IN (
-                          SELECT rowid
-                          FROM books_fts
-                          WHERE books_fts MATCH ?
-                      )
-                )
-                """,
-            ]
-        )
-        params.extend([fts_query, fts_query])
-    return f"({' OR '.join(conditions)})", tuple(params)
+    _configure_book_queries()
+    return book_queries.book_fts_filter(
+        term,
+        include_family_titles=include_family_titles,
+    )
 
 
 def book_filter(
@@ -4464,113 +3355,8 @@ def book_filter(
     entry_filter: str = "all",
     exact_url: str | None = None,
 ) -> tuple[str, tuple[str, ...]]:
-    if exact_url:
-        return " WHERE books.url = ?", (exact_url,)
-
-    conditions: list[str] = []
-    params: list[str] = []
-    if query:
-        for term in parse_search_terms(query):
-            escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            if term.isdecimal():
-                if books_fts_available():
-                    fts_filter = book_fts_filter(term, include_family_titles=False)
-                    if fts_filter:
-                        condition, condition_params = fts_filter
-                        conditions.append(condition)
-                        params.extend(condition_params)
-                conditions.append(
-                    """
-                    (
-                        books.title LIKE ? ESCAPE '\\'
-                        OR books.associated_names LIKE ? ESCAPE '\\'
-                    )
-                    """
-                )
-                params.extend([f"%{escaped}%"] * 2)
-                continue
-            if books_fts_available():
-                fts_filter = book_fts_filter(term, include_family_titles=True)
-                if fts_filter:
-                    condition, condition_params = fts_filter
-                    conditions.append(condition)
-                    params.extend(condition_params)
-            conditions.append(
-                """
-                (
-                    books.title LIKE ? ESCAPE '\\'
-                    OR books.associated_names LIKE ? ESCAPE '\\'
-                    OR EXISTS (
-                        SELECT 1
-                        FROM books AS parent
-                        WHERE parent.url = books.original_post_url
-                          AND parent.title LIKE ? ESCAPE '\\'
-                    )
-                    OR EXISTS (
-                        SELECT 1
-                        FROM books AS sibling
-                        WHERE sibling.original_post_url =
-                              COALESCE(books.original_post_url, books.url)
-                          AND sibling.title LIKE ? ESCAPE '\\'
-                    )
-                )
-                """
-            )
-            params.extend([f"%{escaped}%"] * 4)
-
-    preference_series_url = "COALESCE(books.original_post_url, books.url)"
-    if entry_filter == "hidden":
-        conditions.append(
-            f"""
-            EXISTS (
-                SELECT 1
-                FROM series_preferences AS preference
-                WHERE preference.series_url = {preference_series_url}
-                  AND preference.hidden = 1
-            )
-            """
-        )
-    else:
-        conditions.append(
-            f"""
-            NOT EXISTS (
-                SELECT 1
-                FROM series_preferences AS preference
-                WHERE preference.series_url = {preference_series_url}
-                  AND preference.hidden = 1
-            )
-            """
-        )
-
-    if entry_filter == "favorites":
-        conditions.append(
-            f"""
-            EXISTS (
-                SELECT 1
-                FROM series_preferences AS preference
-                WHERE preference.series_url = {preference_series_url}
-                  AND preference.favorite = 1
-            )
-            """
-        )
-    elif entry_filter == "series":
-        conditions.append("entry_type = 'series'")
-    elif entry_filter == "volumes":
-        conditions.append("entry_type = 'volume'")
-    elif entry_filter == "pending":
-        conditions.append(
-            """
-            (
-                detail_cached_at IS NULL
-                OR entry_type IS NULL
-                OR download_url IS NULL
-            )
-            """
-        )
-
-    if not conditions:
-        return "", ()
-    return f" WHERE {' AND '.join(conditions)}", tuple(params)
+    _configure_book_queries()
+    return book_queries.book_filter(query, entry_filter, exact_url)
 
 
 def count_books(
@@ -4578,100 +3364,13 @@ def count_books(
     entry_filter: str = "all",
     exact_url: str | None = None,
 ) -> int:
-    where_clause, params = book_filter(query, entry_filter, exact_url)
-    with connect_db() as connection:
-        return connection.execute(
-            f"SELECT COUNT(*) FROM books{where_clause}",
-            params,
-        ).fetchone()[0]
+    _configure_book_queries()
+    return book_queries.count_books(query, entry_filter, exact_url)
 
 
 def count_book_filters() -> dict[str, int]:
-    global _book_filter_counts_cache
-    with _book_filter_counts_lock:
-        if (
-            _book_filter_counts_cache is not None
-            and _book_filter_counts_cache[0] == DB_PATH
-        ):
-            return dict(_book_filter_counts_cache[1])
-
-    with connect_db() as connection:
-        row = connection.execute(
-            """
-            SELECT SUM(NOT EXISTS (
-                       SELECT 1
-                       FROM series_preferences AS preference
-                       WHERE preference.series_url =
-                             COALESCE(books.original_post_url, books.url)
-                         AND preference.hidden = 1
-                   )) AS all_count,
-                   SUM(
-                       entry_type = 'series'
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM series_preferences AS preference
-                           WHERE preference.series_url =
-                                 COALESCE(books.original_post_url, books.url)
-                             AND preference.hidden = 1
-                       )
-                   ) AS series_count,
-                   SUM(
-                       entry_type = 'volume'
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM series_preferences AS preference
-                           WHERE preference.series_url =
-                                 COALESCE(books.original_post_url, books.url)
-                             AND preference.hidden = 1
-                       )
-                   ) AS volume_count,
-                   SUM(
-                       (
-                           detail_cached_at IS NULL
-                           OR entry_type IS NULL
-                           OR download_url IS NULL
-                       )
-                       AND NOT EXISTS (
-                           SELECT 1
-                           FROM series_preferences AS preference
-                           WHERE preference.series_url =
-                                 COALESCE(books.original_post_url, books.url)
-                             AND preference.hidden = 1
-                       )
-                   ) AS pending_count
-                   ,SUM(
-                       EXISTS (
-                           SELECT 1
-                           FROM series_preferences AS preference
-                           WHERE preference.series_url =
-                                 COALESCE(books.original_post_url, books.url)
-                             AND preference.favorite = 1
-                             AND preference.hidden = 0
-                       )
-                   ) AS favorite_count
-                   ,SUM(
-                       EXISTS (
-                           SELECT 1
-                           FROM series_preferences AS preference
-                           WHERE preference.series_url =
-                                 COALESCE(books.original_post_url, books.url)
-                             AND preference.hidden = 1
-                       )
-                   ) AS hidden_count
-            FROM books
-            """
-        ).fetchone()
-    counts = {
-        "all": row["all_count"] or 0,
-        "series": row["series_count"] or 0,
-        "volumes": row["volume_count"] or 0,
-        "pending": row["pending_count"] or 0,
-        "favorites": row["favorite_count"] or 0,
-        "hidden": row["hidden_count"] or 0,
-    }
-    with _book_filter_counts_lock:
-        _book_filter_counts_cache = (DB_PATH, counts)
-    return dict(counts)
+    _configure_book_queries()
+    return book_queries.count_book_filters()
 
 
 def list_books(
@@ -4682,429 +3381,20 @@ def list_books(
     entry_filter: str = "all",
     exact_url: str | None = None,
 ) -> list[dict[str, Any]]:
-    order_by = {
-        "published_desc": (
-            "published_at IS NULL, published_at DESC, "
-            "source_order IS NULL, source_order ASC, id ASC"
-        ),
-        "published_asc": (
-            "published_at IS NULL, published_at ASC, "
-            "source_order IS NULL, source_order DESC, id DESC"
-        ),
-        "title_asc": "title COLLATE NOCASE ASC, id ASC",
-        "title_desc": "title COLLATE NOCASE DESC, id DESC",
-        "cached_desc": "cached_at DESC, title COLLATE NOCASE, id DESC",
-    }.get(
+    _configure_book_queries()
+    return book_queries.list_books(
+        query,
         sort,
-        "published_at IS NULL, published_at DESC, "
-        "source_order IS NULL, source_order ASC, id ASC",
+        limit,
+        offset,
+        entry_filter,
+        exact_url,
     )
-
-    where_clause, filter_params = book_filter(query, entry_filter, exact_url)
-    sql = """
-        SELECT id, title, url, image_url, published_at, cached_at, last_seen_at,
-               source_order,
-               entry_type, original_post_url, download_url, detail_cached_at,
-               associated_names, genres, synopsis,
-               EXISTS (
-                   SELECT 1
-                   FROM series_preferences AS preference
-                   WHERE preference.series_url =
-                         COALESCE(books.original_post_url, books.url)
-                     AND preference.favorite = 1
-               ) AS is_favorite,
-               EXISTS (
-                   SELECT 1
-                   FROM series_preferences AS preference
-                   WHERE preference.series_url =
-                         COALESCE(books.original_post_url, books.url)
-                     AND preference.hidden = 1
-               ) AS is_hidden,
-                (
-                    SELECT sibling.title
-                   FROM books AS sibling
-                   WHERE sibling.original_post_url =
-                         COALESCE(books.original_post_url, books.url)
-                   ORDER BY sibling.published_at IS NULL,
-                            sibling.published_at DESC,
-                            sibling.id DESC
-                    LIMIT 1
-                 ) AS latest_series_title,
-               (
-                  SELECT parent.title
-                  FROM books AS parent
-                  WHERE parent.url =
-                        COALESCE(books.original_post_url, books.url)
-                  LIMIT 1
-               ) AS parent_series_title,
-               (
-                  SELECT parent.download_url
-                  FROM books AS parent
-                  WHERE parent.url =
-                        COALESCE(books.original_post_url, books.url)
-                  LIMIT 1
-               ) AS parent_series_download,
-                 COALESCE(
-                    (
-                        SELECT own_catalog_volume.label
-                        FROM series_volumes AS own_catalog_volume
-                        WHERE own_catalog_volume.download_url = books.download_url
-                          AND own_catalog_volume.series_url =
-                              COALESCE(books.original_post_url, books.url)
-                        ORDER BY own_catalog_volume.position
-                        LIMIT 1
-                    ),
-                    (
-                        SELECT matching_catalog_volume.label
-                        FROM series_volumes AS matching_catalog_volume
-                        WHERE matching_catalog_volume.download_url =
-                              books.download_url
-                        ORDER BY matching_catalog_volume.position
-                        LIMIT 1
-                    )
-                ) AS catalog_volume_label
-        FROM books
-    """ + where_clause
-    params: tuple[Any, ...] = filter_params
-    sql += f" ORDER BY {order_by}"
-    if limit is not None:
-        sql += " LIMIT ? OFFSET ?"
-        params += (limit, offset)
-
-    with connect_db() as connection:
-        rows = connection.execute(sql, params).fetchall()
-
-    books = [dict(row) for row in rows]
-    (
-        catalog_index,
-        download_catalog_index,
-        volume_counts,
-        download_category_counts,
-        primary_category_counts,
-    ) = get_catalog_indexes()
-    aggregate_parent_urls = infer_aggregate_catalog_parents_from_db(
-        [
-            (book["url"], book["title"])
-            for book in books
-            if book["entry_type"] == "series"
-        ]
-    )
-    for book in books:
-        book["associated_names"] = decode_string_list(book["associated_names"])
-        book["genres"] = decode_string_list(book["genres"])
-        book["is_favorite"] = bool(book["is_favorite"])
-        book["is_hidden"] = bool(book["is_hidden"])
-        series_title, volume_label = parse_book_identity(book["title"], book["url"])
-        if book["parent_series_title"]:
-            series_title, _ = parse_book_identity(
-                book["parent_series_title"],
-                book["original_post_url"] or book["url"],
-            )
-        if book["latest_series_title"]:
-            latest_series_title, latest_volume_label = parse_book_identity(
-                book["latest_series_title"],
-                book["original_post_url"] or book["url"],
-            )
-            if latest_volume_label and not is_distinct_subseries_title(
-                series_title,
-                latest_series_title,
-            ):
-                series_title = latest_series_title
-        volume_label = prefer_catalog_volume_badge(
-            volume_label,
-            book["catalog_volume_label"],
-        )
-        volume_label = qualify_numbered_subseries_badge(
-            book["title"],
-            volume_label,
-        )
-        series_url = (
-            book["original_post_url"]
-            if book["entry_type"] == "volume"
-            else book["url"] if book["entry_type"] == "series" else None
-        )
-        aggregate_parent_url = aggregate_parent_urls.get(book["url"])
-        if aggregate_parent_url:
-            series_url = aggregate_parent_url
-        catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
-        download_catalog = download_catalog_index.get(book["download_url"] or "")
-        book_key = series_identity_key(book["title"], book["url"])
-        may_infer_catalog = not series_url or volume_counts.get(series_url, 0) <= 1
-        if (
-            may_infer_catalog
-            and download_catalog
-            and download_catalog[1] > volume_counts.get(series_url or "", 0)
-        ):
-            series_url = download_catalog[0]
-        if (
-            may_infer_catalog
-            and catalog
-            and catalog[1] > volume_counts.get(series_url or "", 0)
-        ):
-            series_url = catalog[0]
-        book["series_title"] = series_title
-        book["series_url"] = series_url
-        book["series_page_url"] = SHARED_INDEX_SUBSERIES.get(
-            book_key,
-            series_url if series_url and is_internal_jnovels_url(series_url) else None,
-        )
-        book["is_aggregate_catalog"] = bool(aggregate_parent_url)
-        book["volume_count"] = volume_counts.get(series_url or "", 0)
-        if book["entry_type"] == "series":
-            volume_label = None
-        book["volume_label"] = volume_label
-        primary_catalog_count = primary_category_counts.get(
-            series_url or "",
-            book["volume_count"],
-        )
-        book["catalog_count"] = download_category_counts.get(
-            book["download_url"] or "",
-            primary_catalog_count,
-        )
-        title_and_url = f"{book['title']} {book['url']}".casefold()
-        book["catalog_kind"] = (
-            "downloads"
-            if "webnovel" in title_and_url
-            or "[pdf]" in title_and_url
-            or "[epub]" in title_and_url
-            or "pdfepub" in title_and_url
-            else "volumes"
-        )
-        book["is_standalone"] = (
-            book["entry_type"] == "series" and book["volume_count"] == 1
-        )
-    return books
 
 
 def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
-    def add_book_rows(
-        collected: dict[str, sqlite3.Row],
-        connection: sqlite3.Connection,
-        sql: str,
-        params: tuple[Any, ...],
-    ) -> None:
-        for row in connection.execute(sql, params).fetchall():
-            collected.setdefault(row["url"], row)
-
-    def url_lookup_variants(url: str) -> set[str]:
-        canonical = canonical_page_url(url)
-        variants = {url, canonical}
-        parsed = urllib.parse.urlsplit(canonical)
-        if parsed.path != "/" and not parsed.path.endswith("/"):
-            variants.add(
-                urllib.parse.urlunsplit(parsed._replace(path=f"{parsed.path}/"))
-            )
-        return variants
-
-    def chunks(values: list[str], size: int = 400) -> Iterator[list[str]]:
-        for index in range(0, len(values), size):
-            yield values[index : index + size]
-
-    with connect_db() as connection:
-        rows = [
-            dict(row)
-            for row in connection.execute(
-                """
-                SELECT label, download_url, position, cached_at, release_group
-                FROM series_volumes
-                WHERE series_url = ?
-                ORDER BY position
-                """,
-                (series_url,),
-            ).fetchall()
-        ]
-        series_book = connection.execute(
-            """
-            SELECT title, url, download_url, published_at, entry_type,
-                   original_post_url
-            FROM books
-            WHERE url = ?
-            """,
-            (series_url,),
-        ).fetchone()
-        book_rows_by_url: dict[str, sqlite3.Row] = {}
-        add_book_rows(
-            book_rows_by_url,
-            connection,
-            """
-            SELECT title, url, download_url, published_at, entry_type,
-                   original_post_url
-            FROM books
-            WHERE original_post_url = ?
-            """,
-            (series_url,),
-        )
-        download_urls = sorted(
-            {row["download_url"] for row in rows if row["download_url"]}
-        )
-        for batch in chunks(download_urls):
-            placeholders = ", ".join("?" for _ in batch)
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE download_url IN ({placeholders})
-                """,
-                tuple(batch),
-            )
-        internal_url_variants = sorted(
-            {
-                variant
-                for download_url in download_urls
-                if is_internal_jnovels_url(download_url)
-                for variant in url_lookup_variants(download_url)
-            }
-        )
-        for batch in chunks(internal_url_variants):
-            placeholders = ", ".join("?" for _ in batch)
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE url IN ({placeholders})
-                """,
-                tuple(batch),
-            )
-        labels = sorted({row["label"] for row in rows if row["label"]})
-        for batch in chunks(labels, 80):
-            label_conditions = " OR ".join(
-                "title LIKE ? ESCAPE '\\'" for _ in batch
-            )
-            label_params = tuple(
-                "%"
-                + label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                + "%"
-                for label in batch
-            )
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE entry_type = 'volume'
-                  AND ({label_conditions})
-                """,
-                label_params,
-            )
-
-    target_key = series_identity_key(
-        series_book["title"] if series_book else None,
-        series_url,
-    )
-    series_title = (
-        parse_book_identity(series_book["title"], series_url)[0]
-        if series_book
-        else None
-    )
-    if series_book and "short story collection" in series_book["title"].casefold():
-        for volume in rows:
-            volume["label"] = re.sub(
-                r"^Short Story Collection\s+",
-                "",
-                volume["label"],
-                flags=re.IGNORECASE,
-            )
-    matches: dict[str, list[sqlite3.Row]] = {}
-    family_downloads: dict[str, sqlite3.Row] = {}
-    internal_posts: dict[str, sqlite3.Row] = {}
-    book_rows = sorted(
-        book_rows_by_url.values(),
-        key=lambda book: (
-            book["entry_type"] == "volume",
-            book["published_at"] or "",
-            book["url"],
-        ),
-        reverse=True,
-    )
-    for book in book_rows:
-        internal_posts.setdefault(canonical_page_url(book["url"]), book)
-        unrelated = (
-            canonical_page_url(book["original_post_url"] or "") !=
-            canonical_page_url(series_url)
-            and series_identity_key(book["title"], book["url"]) != target_key
-        )
-        aggregate_parent_url = (
-            infer_aggregate_catalog_parent_from_db(book["url"], book["title"])
-            if book["entry_type"] == "series"
-            else None
-        )
-        if unrelated and aggregate_parent_url != series_url:
-            continue
-        is_volume_book = book["entry_type"] == "volume"
-        if is_volume_book and book["download_url"]:
-            family_downloads.setdefault(book["download_url"], book)
-        elif aggregate_parent_url == series_url and book["download_url"]:
-            family_downloads.setdefault(book["download_url"], book)
-        label = extract_catalog_label(book["title"])
-        if is_volume_book and label:
-            matches.setdefault(label.casefold(), []).append(book)
-
-    if series_book and series_book["download_url"]:
-        family_downloads.setdefault(series_book["download_url"], series_book)
-
-    label_categories: dict[str, set[str]] = {}
-    for volume in rows:
-        format_family = format_release_family(volume["release_group"])
-        category = (
-            f"__format__:{format_family}"
-            if format_family is not None
-            else (volume["release_group"] or "").casefold() or "__default__"
-        )
-        label_categories.setdefault(volume["label"].casefold(), set()).add(category)
-
-    for volume in rows:
-        internal_reference = is_internal_jnovels_url(volume["download_url"])
-        volume["is_internal_reference"] = internal_reference
-        book = (
-            internal_posts.get(canonical_page_url(volume["download_url"]))
-            if internal_reference
-            else family_downloads.get(volume["download_url"])
-        )
-        label_key = volume["label"].casefold()
-        if (
-            book is None
-            and not internal_reference
-            and len(label_categories.get(label_key, set())) <= 1
-        ):
-            candidates = matches.get(label_key, [])
-            book = max(
-                candidates,
-                key=lambda candidate: candidate["published_at"] or "",
-                default=None,
-            )
-        volume["published_at"] = book["published_at"] if book else None
-        volume["post_url"] = book["url"] if book else None
-        volume["display_label"] = catalog_display_label(
-            volume["label"],
-            series_title,
-            volume["release_group"],
-        )
-
-    dated_formats: dict[tuple[str, str], dict[str, Any]] = {}
-    for volume in rows:
-        format_family = format_release_family(volume["release_group"])
-        if format_family is not None and volume["published_at"]:
-            dated_formats.setdefault(
-                (format_family, volume["label"].casefold()),
-                volume,
-            )
-    for volume in rows:
-        format_family = format_release_family(volume["release_group"])
-        if format_family is None or volume["published_at"]:
-            continue
-        dated = dated_formats.get((format_family, volume["label"].casefold()))
-        if dated:
-            volume["published_at"] = dated["published_at"]
-            volume["post_url"] = dated["post_url"]
-    return filter_pdf_rows_when_epub_exists(rows)
+    _configure_book_queries()
+    return book_queries.list_series_volumes(series_url)
 
 
 AppHandler = create_app_handler(sys.modules[__name__])

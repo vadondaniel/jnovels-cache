@@ -5,8 +5,8 @@ import urllib.parse
 from html.parser import HTMLParser
 from typing import Any
 
-from config import SAO_INDEX_URL
-from label_utils import (
+from server_modules.config import SAO_INDEX_URL
+from server_modules.normalization.label_utils import (
     catalog_label_with_subtitle,
     extract_catalog_label,
     extract_sao_volume_label,
@@ -14,8 +14,8 @@ from label_utils import (
     legacy_anchor_label,
     looks_like_download_text,
 )
-from models import PostDetails, SeriesVolume
-from release_groups import (
+from server_modules.domain.models import PostDetails, SeriesVolume
+from server_modules.normalization.release_groups import (
     catalog_section_from_heading,
     default_catalog_section_from_url,
     is_format_release_group,
@@ -23,8 +23,8 @@ from release_groups import (
     release_group_from_catalog_text,
     release_group_from_heading,
 )
-from text_utils import normalize_synopsis, unique_nonempty_lines
-from url_utils import (
+from server_modules.normalization.text_utils import normalize_synopsis, unique_nonempty_lines
+from server_modules.normalization.url_utils import (
     canonical_page_url,
     is_external_http_url,
     is_external_site_root,

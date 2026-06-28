@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 
-from text_utils import normalize_legacy_title_case
+from server_modules.normalization.text_utils import normalize_legacy_title_case
 
 
 def release_group_from_heading(text: str) -> str | None:

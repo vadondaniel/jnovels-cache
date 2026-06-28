@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
-DB_PATH = ROOT / "jnovels_cache.db"
+DB_PATH = ROOT / "jnovels.db"
 BASE_URL = "https://jnovels.com"
 USER_AGENT = "JNovelsCache/1.0 (+local personal metadata cache)"
 DEFAULT_PAGE_SIZE = 24

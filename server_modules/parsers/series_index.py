@@ -3,9 +3,9 @@ from __future__ import annotations
 import urllib.parse
 from html.parser import HTMLParser
 
-from config import SERIES_INDEX_URL
-from models import Book
-from url_utils import canonical_page_url
+from server_modules.config import SERIES_INDEX_URL
+from server_modules.domain.models import Book
+from server_modules.normalization.url_utils import canonical_page_url
 
 
 class SeriesIndexParser(HTMLParser):

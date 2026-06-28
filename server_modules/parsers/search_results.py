@@ -5,8 +5,8 @@ import urllib.parse
 from datetime import datetime
 from html.parser import HTMLParser
 
-from config import EXCLUDED_SEARCH_PATHS
-from models import Book
+from server_modules.config import EXCLUDED_SEARCH_PATHS
+from server_modules.domain.models import Book
 
 
 class SearchResultsParser(HTMLParser):

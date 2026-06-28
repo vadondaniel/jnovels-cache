@@ -2,7 +2,23 @@ from __future__ import annotations
 
 import re
 
-from text_utils import normalize_legacy_title_case
+from server_modules.normalization.text_utils import normalize_legacy_title_case
+
+
+def catalog_display_label(
+    label: str,
+    series_title: str | None,
+    release_group: str | None,
+) -> str:
+    if not series_title or (release_group or "").casefold() != "side stories":
+        return label
+    stripped = re.sub(
+        rf"^{re.escape(series_title)}\s*[-–—:]\s*",
+        "",
+        label,
+        flags=re.IGNORECASE,
+    ).strip()
+    return stripped or label
 
 
 def catalog_label_with_subtitle(label: str, text: str) -> str:
