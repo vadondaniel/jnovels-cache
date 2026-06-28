@@ -2338,6 +2338,18 @@ def initialize_db() -> None:
         )
         connection.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_books_original_post_published
+            ON books(original_post_url, published_at DESC, id DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_books_download_url
+            ON books(download_url)
+            """
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO series_status (series_url, checked_at)
             SELECT series_url, MAX(cached_at)
             FROM series_volumes
@@ -5821,6 +5833,29 @@ def list_books(
 
 
 def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
+    def add_book_rows(
+        collected: dict[str, sqlite3.Row],
+        connection: sqlite3.Connection,
+        sql: str,
+        params: tuple[Any, ...],
+    ) -> None:
+        for row in connection.execute(sql, params).fetchall():
+            collected.setdefault(row["url"], row)
+
+    def url_lookup_variants(url: str) -> set[str]:
+        canonical = canonical_page_url(url)
+        variants = {url, canonical}
+        parsed = urllib.parse.urlsplit(canonical)
+        if parsed.path != "/" and not parsed.path.endswith("/"):
+            variants.add(
+                urllib.parse.urlunsplit(parsed._replace(path=f"{parsed.path}/"))
+            )
+        return variants
+
+    def chunks(values: list[str], size: int = 400) -> Iterator[list[str]]:
+        for index in range(0, len(values), size):
+            yield values[index : index + size]
+
     with connect_db() as connection:
         rows = [
             dict(row)
@@ -5843,14 +5878,78 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
             """,
             (series_url,),
         ).fetchone()
-        book_rows = connection.execute(
+        book_rows_by_url: dict[str, sqlite3.Row] = {}
+        add_book_rows(
+            book_rows_by_url,
+            connection,
             """
             SELECT title, url, download_url, published_at, entry_type,
                    original_post_url
             FROM books
-            ORDER BY entry_type = 'volume' DESC, published_at DESC
-            """
-        ).fetchall()
+            WHERE original_post_url = ?
+            """,
+            (series_url,),
+        )
+        download_urls = sorted(
+            {row["download_url"] for row in rows if row["download_url"]}
+        )
+        for batch in chunks(download_urls):
+            placeholders = ", ".join("?" for _ in batch)
+            add_book_rows(
+                book_rows_by_url,
+                connection,
+                f"""
+                SELECT title, url, download_url, published_at, entry_type,
+                       original_post_url
+                FROM books
+                WHERE download_url IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+        internal_url_variants = sorted(
+            {
+                variant
+                for download_url in download_urls
+                if is_internal_jnovels_url(download_url)
+                for variant in url_lookup_variants(download_url)
+            }
+        )
+        for batch in chunks(internal_url_variants):
+            placeholders = ", ".join("?" for _ in batch)
+            add_book_rows(
+                book_rows_by_url,
+                connection,
+                f"""
+                SELECT title, url, download_url, published_at, entry_type,
+                       original_post_url
+                FROM books
+                WHERE url IN ({placeholders})
+                """,
+                tuple(batch),
+            )
+        labels = sorted({row["label"] for row in rows if row["label"]})
+        for batch in chunks(labels, 80):
+            label_conditions = " OR ".join(
+                "title LIKE ? ESCAPE '\\'" for _ in batch
+            )
+            label_params = tuple(
+                "%"
+                + label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                + "%"
+                for label in batch
+            )
+            add_book_rows(
+                book_rows_by_url,
+                connection,
+                f"""
+                SELECT title, url, download_url, published_at, entry_type,
+                       original_post_url
+                FROM books
+                WHERE entry_type = 'volume'
+                  AND ({label_conditions})
+                """,
+                label_params,
+            )
 
     target_key = series_identity_key(
         series_book["title"] if series_book else None,
@@ -5872,6 +5971,15 @@ def list_series_volumes(series_url: str) -> list[dict[str, Any]]:
     matches: dict[str, list[sqlite3.Row]] = {}
     family_downloads: dict[str, sqlite3.Row] = {}
     internal_posts: dict[str, sqlite3.Row] = {}
+    book_rows = sorted(
+        book_rows_by_url.values(),
+        key=lambda book: (
+            book["entry_type"] == "volume",
+            book["published_at"] or "",
+            book["url"],
+        ),
+        reverse=True,
+    )
     for book in book_rows:
         internal_posts.setdefault(canonical_page_url(book["url"]), book)
         unrelated = (
