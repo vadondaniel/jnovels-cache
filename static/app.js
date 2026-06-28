@@ -1,6 +1,8 @@
 import { request } from "./app/api.js";
 import { elements } from "./app/elements.js";
 import { estimateSyncTime, formatDate } from "./app/formatters.js";
+import { showToast } from "./app/notifications.js";
+import { renderPagination } from "./app/pagination.js";
 import {
   searchDebounceMs,
   state,
@@ -24,13 +26,6 @@ function visibleCatalogGroupName(groupName, hasVisiblePdfGroup) {
   if (!groupName || hasVisiblePdfGroup) return groupName;
   const withoutEpub = groupName.replace(/\s*\bEPUB\b\s*$/i, "").trim();
   return withoutEpub === groupName ? groupName : withoutEpub;
-}
-
-function showToast(message, isError = false) {
-  elements.toast.textContent = message;
-  elements.toast.classList.toggle("is-error", isError);
-  elements.toast.classList.add("is-visible");
-  window.setTimeout(() => elements.toast.classList.remove("is-visible"), 3500);
 }
 
 function renderBooks(books, total) {
@@ -320,31 +315,6 @@ async function showCachedReference(volume) {
   state.entryUrl = volume.post_url;
   state.page = 1;
   await loadBooks({ scroll: true, historyMode: "push" });
-}
-
-function renderPagination(payload) {
-  state.page = payload.page;
-  state.pageSize = payload.page_size;
-  state.pages = payload.pages;
-  state.total = payload.count;
-
-  if (payload.count) {
-    const first = (payload.page - 1) * payload.page_size + 1;
-    const last = first + payload.books.length - 1;
-    elements.count.textContent =
-      `${first}–${last} of ${payload.count} ${payload.count === 1 ? "entry" : "entries"}`;
-  } else {
-    elements.count.textContent = "0 entries";
-  }
-
-  elements.pagination.hidden = payload.pages <= 1;
-  elements.pageNumber.value = String(payload.page);
-  elements.pageNumber.max = String(payload.pages);
-  elements.pageTotal.textContent = `of ${payload.pages}`;
-  elements.pageFirst.disabled = payload.page === 1;
-  elements.pagePrevious.disabled = payload.page === 1;
-  elements.pageNext.disabled = payload.page === payload.pages;
-  elements.pageLast.disabled = payload.page === payload.pages;
 }
 
 async function openCatalog(book) {
