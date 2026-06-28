@@ -85,6 +85,18 @@ const elements = {
   detailsClose: document.querySelector("#details-close"),
 };
 
+function catalogGroupFormat(groupName) {
+  if (/\bpdf\b/i.test(groupName)) return "pdf";
+  if (/\bepub\b/i.test(groupName)) return "epub";
+  return null;
+}
+
+function visibleCatalogGroupName(groupName, hasVisiblePdfGroup) {
+  if (!groupName || hasVisiblePdfGroup) return groupName;
+  const withoutEpub = groupName.replace(/\s*\bEPUB\b\s*$/i, "").trim();
+  return withoutEpub === groupName ? groupName : withoutEpub;
+}
+
 function updateFilterButtons() {
   let availableCategoryCount = 0;
   elements.filterButtons.forEach((button) => {
@@ -292,9 +304,7 @@ function renderBooks(books, total) {
     }
     if (book.volume_count > 1) {
       const catalogName = book.catalog_kind === "downloads" ? "Downloads" : "Volumes";
-      const catalogCount = book.catalog_kind === "downloads"
-        ? book.catalog_count
-        : book.volume_count;
+      const catalogCount = book.catalog_count || book.volume_count;
       catalogButton.textContent = `${catalogName} · ${catalogCount}`;
       catalogButton.addEventListener("click", () => openCatalog(book));
     } else {
@@ -500,6 +510,9 @@ async function openCatalog(book) {
     const releaseGroups = new Set(
       payload.volumes.map((volume) => volume.release_group).filter(Boolean),
     );
+    const hasVisiblePdfGroup = payload.volumes.some(
+      (volume) => catalogGroupFormat(volume.release_group || "") === "pdf",
+    );
     const numberedVolumes = new Set(
       payload.volumes
         .map((volume) => volume.label.match(/^Volume\s+([0-9]+(?:\.[0-9]+)?)/i)?.[1])
@@ -520,7 +533,7 @@ async function openCatalog(book) {
     const grouped = new Map();
     payload.volumes.forEach((volume) => {
       let groupName = volume.release_group || "";
-      let displayLabel = volume.label;
+      let displayLabel = volume.display_label || volume.label;
       const partMatch = displayLabel.match(/^Part (\d+) (.+)$/i);
       if (!groupName && partMatch) {
         groupName = `Part ${Number(partMatch[1])}`;
@@ -543,7 +556,29 @@ async function openCatalog(book) {
       if (!grouped.has(groupName)) grouped.set(groupName, []);
       grouped.get(groupName).push({ ...volume, displayLabel });
     });
-    grouped.forEach((volumes, groupName) => {
+    const groupPriority = (groupName) => {
+      const normalized = groupName.toLowerCase();
+      const isLightNovel = normalized.includes("light novel");
+      const isRevised = normalized.includes("revised edition");
+      const isEpub = /\bepub\b/.test(normalized);
+      const isPdf = /\bpdf\b/.test(normalized);
+      if (isLightNovel && isEpub) return 0;
+      if (isRevised && isEpub) return 1;
+      if (isLightNovel && isPdf) return 2;
+      if (isLightNovel) return 3;
+      if (isRevised) return 4;
+      if (isEpub) return 5;
+      if (normalized.includes("official")) return 6;
+      if (normalized && !normalized.includes("fan") && !isPdf) return 7;
+      if (isPdf) return 8;
+      if (normalized.includes("fan")) return 9;
+      return 10;
+    };
+    const orderedGroups = [...grouped.entries()].sort(
+      ([groupNameA], [groupNameB]) =>
+        groupPriority(groupNameA) - groupPriority(groupNameB),
+    );
+    orderedGroups.forEach(([groupName, volumes]) => {
       const group = document.createElement("section");
       const list = document.createElement("div");
       group.className = "catalog-dialog__group";
@@ -552,9 +587,10 @@ async function openCatalog(book) {
         "is-related",
         volumes.some((volume) => volume.is_internal_reference),
       );
-      if (groupName) {
+      const visibleGroupName = visibleCatalogGroupName(groupName, hasVisiblePdfGroup);
+      if (visibleGroupName) {
         const heading = document.createElement("h3");
-        heading.textContent = groupName;
+        heading.textContent = visibleGroupName;
         group.append(heading);
       }
       volumes.forEach((volume) => {

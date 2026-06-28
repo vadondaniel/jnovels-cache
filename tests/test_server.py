@@ -668,6 +668,114 @@ class ParserTests(unittest.TestCase):
             ],
         )
 
+    def test_preserves_named_version_group_with_parenthetical_note(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p><strong>SOL PRESS VERSION (DEFUNCT)</strong></p>
+              <ol>
+                <li>Example volume 1 epub <a href="https://files.example/sol-1">Download</a></li>
+                <li>Example volume 2 epub <a href="https://files.example/sol-2">Download</a></li>
+              </ol>
+              <p><strong>JNOVEL-CLUB VERSION</strong></p>
+              <ol>
+                <li>Example volume 1 epub <a href="https://files.example/jnc-1">Download</a></li>
+              </ol>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                ("SOL PRESS VERSION (DEFUNCT)", "Volume 1", "https://files.example/sol-1"),
+                ("SOL PRESS VERSION (DEFUNCT)", "Volume 2", "https://files.example/sol-2"),
+                ("JNOVEL-CLUB VERSION", "Volume 1", "https://files.example/jnc-1"),
+            ],
+        )
+
+    def test_preserves_official_jnovel_club_group(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p><strong>OFFICIAL JNOVEL CLUB</strong></p>
+              <ol>
+                <li>Example --- <a href="https://files.example/official-1">Volume 1</a></li>
+                <li>Example --- <a href="https://files.example/official-10">Volume 10</a></li>
+              </ol>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                ("Official J-Novel Club", "Volume 1", "https://files.example/official-1"),
+                (
+                    "Official J-Novel Club",
+                    "Volume 10",
+                    "https://files.example/official-10",
+                ),
+            ],
+        )
+
+    def test_preserves_official_publisher_headings_as_release_groups(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example-series/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <ol>
+                <li>Example Volume 10 EPUB
+                  <a href="https://files.example/fan-10">DOWNLOAD</a></li>
+              </ol>
+              <p><strong>OFFICIAL JNOVEL CLUB</strong></p>
+              <ol>
+                <li>Example --- Volume 10
+                  <a href="https://files.example/official-10">Volume 10</a></li>
+              </ol>
+              <p><strong>Official</strong></p>
+              <ol>
+                <li>Example Volume 1
+                  <a href="https://files.example/official-alt-1">DOWNLOAD</a></li>
+              </ol>
+              <p><strong>JNC version</strong></p>
+              <ol>
+                <li>Example Volume 2
+                  <a href="https://files.example/jnc-2">DOWNLOAD</a></li>
+              </ol>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                (None, "Volume 10", "https://files.example/fan-10"),
+                (
+                    "Official J-Novel Club",
+                    "Volume 10",
+                    "https://files.example/official-10",
+                ),
+                (
+                    "Official translation",
+                    "Volume 1",
+                    "https://files.example/official-alt-1",
+                ),
+                ("JNC version", "Volume 2", "https://files.example/jnc-2"),
+            ],
+        )
+
     def test_preserves_legacy_pdf_and_epub_format_groups(self):
         parser = server.PostDetailsParser("https://jnovels.com/legacy-formats/")
         parser.feed(LEGACY_FORMAT_SERIES_HTML)
@@ -698,11 +806,42 @@ class ParserTests(unittest.TestCase):
                 for volume in details.volumes
             ],
             [
-                ("PDF", "Complete edition", "https://files.example/pdf"),
-                ("EPUB", "Complete edition", "https://files.example/epub"),
+                ("Web novel PDF", "Complete edition", "https://files.example/pdf"),
+                ("Web novel EPUB", "Complete edition", "https://files.example/epub"),
             ],
         )
         self.assertEqual(details.download_url, "https://files.example/epub")
+
+    def test_light_novel_heading_qualifies_later_format_groups(self):
+        parser = server.PostDetailsParser("https://jnovels.com/webnovelpdfepub-example/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p>PDF</p>
+              <ol><li>Volume 1 <a href="https://files.example/fan-pdf-1">Download</a></li></ol>
+              <p>EPUB</p>
+              <ol><li>Volume 1 <a href="https://files.example/fan-epub-1">Download</a></li></ol>
+              <p>LIGHT NOVEL</p>
+              <p>PDF</p>
+              <ol><li>Volume 1 <a href="https://files.example/ln-pdf-1">Download</a></li></ol>
+              <p>EPUB</p>
+              <ol><li>Volume 1 <a href="https://files.example/ln-epub-1">Download</a></li></ol>
+            </div>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                ("Web novel PDF", "Volume 1", "https://files.example/fan-pdf-1"),
+                ("Web novel EPUB", "Volume 1", "https://files.example/fan-epub-1"),
+                ("Light novel PDF", "Volume 1", "https://files.example/ln-pdf-1"),
+                ("Light novel EPUB", "Volume 1", "https://files.example/ln-epub-1"),
+            ],
+        )
 
     def test_extracts_legacy_paragraph_catalogs(self):
         parser = server.PostDetailsParser("https://jnovels.com/legacy-paragraphs/")
@@ -716,12 +855,119 @@ class ParserTests(unittest.TestCase):
                 for volume in details.volumes
             ],
             [
-                ("EPUB", "Volume 1", "https://files.example/epub-1"),
-                ("EPUB", "Volume 2", "https://files.example/epub-2"),
-                ("PDF", "Volume 1", "https://files.example/pdf-1"),
+                ("EPUB", "Volume 1 - Enrollment Chapter", "https://files.example/epub-1"),
+                ("EPUB", "Volume 2 - Competition Chapter", "https://files.example/epub-2"),
+                ("PDF", "Volume 1 - Enrollment Chapter", "https://files.example/pdf-1"),
             ],
         )
         self.assertEqual(details.download_url, "https://files.example/epub-1")
+
+    def test_legacy_paragraph_catalog_volume_prefix_beats_anchor_title(self):
+        parser = server.PostDetailsParser("https://jnovels.com/mahouka/")
+        parser.feed(
+            """
+            <article><div class="post-content clear">
+              <p><strong>Download Link - EPUB File</strong></p>
+              <p>Volume 1 - <a href="https://enagato.com/v1">Enrollment Chapter</a></p>
+              <p>Volume 23 - <a href="http://charexempire.com/v23">Isolation Chapter</a></p>
+              <p>
+                Mahouka x Sword Art Online Crossover -
+                <a href="http://enagato.com/part1">Part 1 - Dream Game</a>
+              </p>
+              <p>
+                <a href="https://jnovels.com/mangacbz-the-honor-student-at-magic-high-school/">
+                  The Honor Student at Magic High School (Mahouka koukou no rettousei) Manga
+                </a>
+              </p>
+            </div></article>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                ("EPUB", "Volume 1 - Enrollment Chapter", "https://enagato.com/v1"),
+                ("EPUB", "Volume 23 - Isolation Chapter", "http://charexempire.com/v23"),
+                (
+                    "Sword Art Online Crossover EPUB",
+                    "Part 1 - Dream Game",
+                    "http://enagato.com/part1",
+                ),
+                (
+                    "Related manga",
+                    "The Honor Student at Magic High School (Mahouka koukou no rettousei) Manga",
+                    "https://jnovels.com/mangacbz-the-honor-student-at-magic-high-school/",
+                ),
+            ],
+        )
+
+    def test_extracts_standalone_named_legacy_download_links(self):
+        parser = server.PostDetailsParser("https://jnovels.com/high-school-dxd/")
+        parser.feed(
+            """
+            <article><div class="post-content clear">
+              <p><a href="https://enagato.com/ex">High School DxD – EX</a></p>
+              <p><a href="https://enagato.com/fantasia">
+                High School DxD – Fantasia Bunko 25th Anniversary Book
+              </a></p>
+            </div></article>
+            """
+        )
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in parser.details().volumes],
+            [
+                ("High School DxD – EX", "https://enagato.com/ex"),
+                (
+                    "High School DxD – Fantasia Bunko 25th Anniversary Book",
+                    "https://enagato.com/fantasia",
+                ),
+            ],
+        )
+
+    def test_preserves_dx_series_and_side_story_sections(self):
+        parser = server.PostDetailsParser("https://jnovels.com/high-school-dxd/")
+        parser.feed(
+            """
+            <article><div class="post-content clear">
+              <p>Associated Names: High School DxD</p>
+              <ol>
+                <li>Volume 1 <a href="https://files.example/main-1">Download</a></li>
+              </ol>
+              <div>DOWNLOAD LINKS High School DxD DX series BELOW</div>
+              <ol>
+                <li>Volume 1 <a href="https://files.example/dx-1">Download</a></li>
+                <li>Volume 2 <a href="https://files.example/dx-2">Download</a></li>
+              </ol>
+              <p>SIDE STORIES</p>
+              <ol>
+                <li><a href="https://enagato.com/ex">High School DxD – EX</a></li>
+              </ol>
+              <p><strong>OFFICIAL VERSION</strong></p>
+              <ol>
+                <li>Volume 1 <a href="https://files.example/official-1">Download</a></li>
+              </ol>
+            </div></article>
+            """
+        )
+
+        self.assertEqual(
+            [
+                (volume.release_group, volume.label, volume.download_url)
+                for volume in parser.details().volumes
+            ],
+            [
+                (None, "Volume 1", "https://files.example/main-1"),
+                ("DX series", "Volume 1", "https://files.example/dx-1"),
+                ("DX series", "Volume 2", "https://files.example/dx-2"),
+                ("Side stories", "High School DxD – EX", "https://enagato.com/ex"),
+                ("Official translation", "Volume 1", "https://files.example/official-1"),
+            ],
+        )
+        self.assertEqual(parser.details().associated_names, ["High School DxD"])
 
     def test_extracts_inline_legacy_synopsis_and_associated_names(self):
         parser = server.PostDetailsParser("https://jnovels.com/bookworm/")
@@ -1480,6 +1726,83 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(saved[child_url]["volume_count"], 5)
         self.assertEqual(saved[child_url]["catalog_count"], 2)
 
+    def test_card_catalog_count_uses_primary_category_without_series_download(self):
+        series_url = "https://jnovels.com/example-series/"
+        server.upsert_books(
+            [server.Book("Example Series", series_url, None, None)]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                None,
+                [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/fan-{number}",
+                        number - 1,
+                    )
+                    for number in range(1, 4)
+                ]
+                + [
+                    server.SeriesVolume(
+                        f"Volume {number}",
+                        f"https://files.example/official-{number}",
+                        number + 2,
+                        "Official translation",
+                    )
+                    for number in range(1, 6)
+                ],
+            ),
+        )
+
+        saved = server.list_books("", "title_asc")[0]
+
+        self.assertEqual(saved["volume_count"], 8)
+        self.assertEqual(saved["catalog_count"], 3)
+
+    def test_side_story_display_label_strips_series_prefix(self):
+        series_url = "https://jnovels.com/high-school-dxd/"
+        server.upsert_books(
+            [server.Book("High School DxD All Volumes EPUB", series_url, None, None)]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/main-1",
+                [
+                    server.SeriesVolume(
+                        "High School DxD - EX",
+                        "https://enagato.com/ex",
+                        0,
+                        "Side stories",
+                    ),
+                    server.SeriesVolume(
+                        "High School DxD - Fantasia Bunko 25th Anniversary Book",
+                        "https://enagato.com/fantasia",
+                        1,
+                        "Side stories",
+                    ),
+                ],
+            ),
+        )
+
+        saved = server.list_series_volumes(series_url)
+
+        self.assertEqual(
+            [(row["label"], row["display_label"]) for row in saved],
+            [
+                ("High School DxD - EX", "EX"),
+                (
+                    "High School DxD - Fantasia Bunko 25th Anniversary Book",
+                    "Fantasia Bunko 25th Anniversary Book",
+                ),
+            ],
+        )
+
     def test_title_search_escapes_sql_wildcards(self):
         server.upsert_books(
             [
@@ -2233,7 +2556,7 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(saved["volume_label"], "Vol. 13")
 
-    def test_first_volume_with_multi_volume_catalog_uses_series_badge(self):
+    def test_first_volume_with_multi_volume_catalog_keeps_volume_badge(self):
         series_url = "https://jnovels.com/example-series/"
         child_url = "https://jnovels.com/example-series-volume-1-epub/"
         server.upsert_books(
@@ -2261,7 +2584,45 @@ class DatabaseTests(unittest.TestCase):
 
         saved = {book["url"]: book for book in server.list_books("", "title_asc")}
 
-        self.assertEqual(saved[child_url]["volume_label"], "Series")
+        self.assertEqual(saved[child_url]["volume_label"], "Vol. 1")
+
+    def test_standalone_first_volume_keeps_volume_badge_when_download_differs(self):
+        series_url = "https://jnovels.com/example-series/"
+        child_url = "https://jnovels.com/example-series-volume-1-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 1 Epub", child_url, None, None),
+            ]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/index-download",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/volume-1-download",
+                        0,
+                    ),
+                    server.SeriesVolume("Volume 2", "https://files.example/v2", 1),
+                ],
+            ),
+        )
+        server.update_book_details(
+            child_url,
+            server.PostDetails(
+                "volume",
+                series_url,
+                "https://files.example/volume-1-download",
+            ),
+        )
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+
+        self.assertEqual(saved[child_url]["volume_label"], "Vol. 1")
 
     def test_series_catalog_uses_series_post_date_for_its_first_download(self):
         series_url = "https://example/series"
@@ -2283,6 +2644,224 @@ class DatabaseTests(unittest.TestCase):
 
         self.assertEqual(saved["published_at"], "2022-08-15")
         self.assertEqual(saved["post_url"], series_url)
+
+    def test_multi_section_catalog_uses_series_post_date_for_default_group(self):
+        series_url = "https://example/series"
+        download_url = "https://files.example/v1"
+        server.upsert_books(
+            [server.Book("Example Series", series_url, None, "2022-08-15")]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                download_url,
+                [
+                    server.SeriesVolume("Volume 1", download_url, 0),
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/official-v1",
+                        1,
+                        "Official translation",
+                    ),
+                ],
+            ),
+        )
+
+        saved = server.list_series_volumes(series_url)[0]
+
+        self.assertEqual(saved["published_at"], "2022-08-15")
+        self.assertEqual(saved["post_url"], series_url)
+
+        official = server.list_series_volumes(series_url)[1]
+        self.assertIsNone(official["published_at"])
+        self.assertIsNone(official["post_url"])
+
+    def test_named_group_first_download_uses_series_post_date(self):
+        series_url = "https://example/series"
+        download_url = "https://files.example/jnc-v1"
+        server.upsert_books(
+            [server.Book("Example Series", series_url, None, "2022-08-15")]
+        )
+        server.update_book_details(
+            series_url,
+            server.PostDetails(
+                "series",
+                None,
+                download_url,
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        download_url,
+                        0,
+                        "JNC version",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/jnc-v2",
+                        1,
+                        "JNC version",
+                    ),
+                ],
+            ),
+        )
+
+        saved = server.list_series_volumes(series_url)
+
+        self.assertEqual(saved[0]["published_at"], "2022-08-15")
+        self.assertEqual(saved[0]["post_url"], series_url)
+        self.assertIsNone(saved[1]["published_at"])
+        self.assertIsNone(saved[1]["post_url"])
+
+    def test_aggregate_revised_catalog_merges_as_parent_release_group(self):
+        parent_url = "https://jnovels.com/jobless-reincarnation-light-novel-epub/"
+        aggregate_url = (
+            "https://jnovels.com/"
+            "jobless-reincarnation-volume-1-2-light-novel-revised-edition/"
+        )
+        server.upsert_books(
+            [
+                server.Book(
+                    "Jobless Reincarnation Light Novel Epub",
+                    parent_url,
+                    None,
+                    "2021-01-01",
+                ),
+                server.Book(
+                    "Jobless Reincarnation Volume 1-2 Light Novel Revised Edition",
+                    aggregate_url,
+                    None,
+                    "2021-05-12",
+                ),
+            ]
+        )
+        server.update_book_details(
+            parent_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/current-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/current-1",
+                        0,
+                        "Light novel EPUB",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/current-2",
+                        1,
+                        "Light novel EPUB",
+                    ),
+                ],
+            ),
+        )
+
+        server.update_book_details(
+            aggregate_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/revised-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/revised-1",
+                        0,
+                        "EPUB",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/revised-2",
+                        1,
+                        "EPUB",
+                    ),
+                ],
+            ),
+        )
+        server.update_book_details(
+            aggregate_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/revised-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/revised-1",
+                        0,
+                        "EPUB",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/revised-2",
+                        1,
+                        "EPUB",
+                    ),
+                ],
+            ),
+        )
+        server.update_book_details(
+            parent_url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/current-1",
+                [
+                    server.SeriesVolume(
+                        "Volume 1",
+                        "https://files.example/current-1",
+                        0,
+                        "Light novel EPUB",
+                    ),
+                    server.SeriesVolume(
+                        "Volume 2",
+                        "https://files.example/current-2",
+                        1,
+                        "Light novel EPUB",
+                    ),
+                ],
+            ),
+        )
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+        self.assertEqual(saved[aggregate_url]["entry_type"], "series")
+        self.assertIsNone(saved[aggregate_url]["original_post_url"])
+        self.assertEqual(saved[aggregate_url]["series_url"], parent_url)
+        self.assertEqual(saved[aggregate_url]["catalog_count"], 2)
+        parent_rows = server.list_series_volumes(parent_url)
+        self.assertNotIn("Volume 1-2", [row["label"] for row in parent_rows])
+        self.assertEqual(
+            [
+                (
+                    row["release_group"],
+                    row["label"],
+                    row["download_url"],
+                    row["published_at"],
+                    row["post_url"],
+                )
+                for row in parent_rows
+                if row["release_group"] == "Revised edition EPUB"
+            ],
+            [
+                (
+                    "Revised edition EPUB",
+                    "Volume 1",
+                    "https://files.example/revised-1",
+                    "2021-05-12",
+                    aggregate_url,
+                ),
+                (
+                    "Revised edition EPUB",
+                    "Volume 2",
+                    "https://files.example/revised-2",
+                    None,
+                    None,
+                ),
+            ],
+        )
 
     def test_infers_parent_for_broken_self_linked_volume_post(self):
         series_url = "https://jnovels.com/isekai-ni-tensei-shitanda-kedo-ore-all-volumes-epub/"
@@ -2992,6 +3571,24 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual(
             [row["label"] for row in server.list_series_volumes(series_url)],
             ["Volume 1", "Volume 2", "Year 2 Volume 1", "Year 2 Volume 2"],
+        )
+
+    def test_resequence_keeps_standalone_parts_after_main_volumes(self):
+        series_url = "https://jnovels.com/example-series/"
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume("Part 1", "https://files.example/part-1", 0, "EPUB"),
+                server.SeriesVolume("Volume 2", "https://files.example/v2", 1, "EPUB"),
+                server.SeriesVolume("Volume 1", "https://files.example/v1", 2, "EPUB"),
+                server.SeriesVolume("Part 2", "https://files.example/part-2", 3, "EPUB"),
+            ],
+        )
+        server.resequence_series_volumes(series_url)
+
+        self.assertEqual(
+            [row["label"] for row in server.list_series_volumes(series_url)],
+            ["Volume 1", "Volume 2", "Part 1", "Part 2"],
         )
 
     def test_relabels_complete_fallback_from_matching_part_post(self):
@@ -3741,12 +4338,48 @@ class DatabaseTests(unittest.TestCase):
 
         saved = server.list_series_volumes(series_url)
         self.assertEqual(
-            [volume["published_at"] for volume in saved],
-            ["2026-06-09", "2026-06-09"],
+            [
+                (
+                    volume["release_group"],
+                    volume["published_at"],
+                    volume["post_url"],
+                )
+                for volume in saved
+            ],
+            [("EPUB", "2026-06-09", series_url)],
         )
+
+    def test_catalog_index_hides_pdf_only_for_series_with_epub_variant(self):
+        mixed_url = "https://jnovels.com/example-mixed/"
+        pdf_only_url = "https://jnovels.com/example-pdf-only/"
+        server.upsert_books(
+            [
+                server.Book("Example Mixed", mixed_url, None, None),
+                server.Book("Example PDF Only", pdf_only_url, None, None),
+            ]
+        )
+        server.replace_series_volumes(
+            mixed_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/mixed-pdf", 0, "PDF"),
+                server.SeriesVolume("Volume 1", "https://files.example/mixed-epub", 1, "EPUB"),
+            ],
+        )
+        server.replace_series_volumes(
+            pdf_only_url,
+            [
+                server.SeriesVolume("Volume 1", "https://files.example/pdf-only-1", 0, "PDF"),
+                server.SeriesVolume("Volume 2", "https://files.example/pdf-only-2", 1, "PDF"),
+            ],
+        )
+
+        saved = {book["url"]: book for book in server.list_books("", "title_asc")}
+
+        self.assertEqual(saved[mixed_url]["volume_count"], 1)
+        self.assertEqual(saved[pdf_only_url]["volume_count"], 2)
         self.assertEqual(
-            [volume["post_url"] for volume in saved],
-            [series_url, series_url],
+            [row["label"] for row in server.list_series_volumes(pdf_only_url)],
+            ["Volume 1", "Volume 2"],
         )
 
     def test_catalog_dates_do_not_cross_translation_groups_by_label(self):
@@ -4033,6 +4666,55 @@ class DatabaseTests(unittest.TestCase):
             "https://files.example/part-5-v2",
         )
         self.assertEqual(server.list_repair_failures(), [])
+
+    def test_series_download_reconcile_matches_subtitled_catalog_label_by_format(self):
+        series_url = "https://jnovels.com/example-series/"
+        epub_child = "https://jnovels.com/example-series-volume-23-epub/"
+        server.upsert_books(
+            [
+                server.Book("Example Series", series_url, None, None),
+                server.Book("Example Series Volume 23 Epub", epub_child, None, None),
+            ]
+        )
+        with server.connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'volume',
+                    original_post_url = ?,
+                    download_url = ?
+                WHERE url = ?
+                """,
+                (series_url, "https://files.example/old-epub", epub_child),
+            )
+        server.replace_series_volumes(
+            series_url,
+            [
+                server.SeriesVolume(
+                    "Volume 23 - Isolation Chapter",
+                    "https://files.example/new-epub",
+                    0,
+                    "EPUB",
+                ),
+                server.SeriesVolume(
+                    "Volume 23 - Isolation Chapter",
+                    "https://files.example/new-pdf",
+                    1,
+                    "PDF",
+                ),
+            ],
+        )
+
+        self.assertEqual(server.reconcile_series_downloads(series_url), 1)
+
+        with server.connect_db() as connection:
+            downloads = {
+                row["url"]: row["download_url"]
+                for row in connection.execute(
+                    "SELECT url, download_url FROM books ORDER BY url"
+                )
+            }
+        self.assertEqual(downloads[epub_child], "https://files.example/new-epub")
 
     def test_finds_only_entries_with_incomplete_details(self):
         pending = server.Book("Pending", "https://example/pending", None, None)
