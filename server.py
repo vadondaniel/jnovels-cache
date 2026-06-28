@@ -101,7 +101,6 @@ from server_modules.normalization.title_utils import (
     is_named_subseries_title,
     is_numbered_subseries_title,
     normalize_display_title,
-    parent_hint_aliases,
     parse_book_identity,
     qualify_numbered_subseries_badge,
     series_identity_key,
@@ -550,54 +549,13 @@ def merge_explicit_alias_catalogs(
     hints: list[str],
     source_url: str,
 ) -> int:
-    aliases = parent_hint_aliases(hints, source_url)
-    alias_keys = {key for _, key in aliases}
-    if len(alias_keys) < 2:
-        return 0
-    source_format = book_page_format("", source_url)
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT b.title, b.url
-            FROM books AS b
-            WHERE b.entry_type = 'series'
-              AND b.url <> ?
-              AND EXISTS (
-                  SELECT 1
-                  FROM series_volumes AS sv
-                  WHERE sv.series_url = b.url
-              )
-            """,
-            (canonical_series_url,),
-        ).fetchall()
-
-    merged = 0
-    for row in rows:
-        candidate_key = series_identity_key(row["title"], row["url"])
-        candidate_format = book_page_format(row["title"], row["url"])
-        if candidate_key not in alias_keys or candidate_format not in {
-            source_format,
-            "mixed",
-        }:
-            continue
-        _, volume_label = parse_book_identity(row["title"], row["url"])
-        if volume_label:
-            with connect_db() as connection:
-                connection.execute(
-                    """
-                    UPDATE books
-                    SET entry_type = 'volume',
-                        original_post_url = ?
-                    WHERE url = ?
-                    """,
-                    (canonical_series_url, row["url"]),
-                )
-        merged += reparent_series_alias(
-            row["url"],
-            canonical_series_url,
-            dedupe_labels=True,
-        )
-    return merged
+    return catalog_aliases.merge_explicit_alias_catalogs(
+        canonical_series_url,
+        hints,
+        source_url,
+        connect_db=connect_db,
+        reparent_series_alias=reparent_series_alias,
+    )
 
 
 def reconcile_legacy_volume_entries(*, force: bool = False) -> int:
