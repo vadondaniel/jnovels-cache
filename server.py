@@ -423,6 +423,97 @@ def infer_aggregate_catalog_parent_from_db(url: str, title: str) -> str | None:
     )["series_url"]
 
 
+def infer_aggregate_catalog_parents_from_db(
+    candidates: list[tuple[str, str]],
+) -> dict[str, str]:
+    aggregate_candidates = [
+        (url, title)
+        for url, title in candidates
+        if is_aggregate_volume_title(title, url)
+    ]
+    if not aggregate_candidates:
+        return {}
+
+    candidate_urls = [url for url, _title in aggregate_candidates]
+    candidate_placeholders = ", ".join("?" for _ in candidate_urls)
+    labels_by_url: dict[str, set[str]] = {url: set() for url in candidate_urls}
+    with connect_db() as connection:
+        label_rows = connection.execute(
+            f"""
+            SELECT series_url, label
+            FROM series_volumes
+            WHERE series_url IN ({candidate_placeholders})
+            """,
+            candidate_urls,
+        ).fetchall()
+        for row in label_rows:
+            if re.match(r"^Volume\s+[0-9]", row["label"], re.IGNORECASE):
+                labels_by_url[row["series_url"]].add(row["label"].casefold())
+
+        labels_by_url = {
+            url: labels
+            for url, labels in labels_by_url.items()
+            if len(labels) >= 2
+        }
+        if not labels_by_url:
+            return {}
+
+        all_labels = sorted(
+            {label for labels in labels_by_url.values() for label in labels}
+        )
+        label_placeholders = ", ".join("?" for _ in all_labels)
+        matching_rows = connection.execute(
+            f"""
+            SELECT sv.series_url, parent.title, lower(sv.label) AS label,
+                   counts.volume_count
+            FROM series_volumes AS sv
+            JOIN (
+                SELECT series_url, COUNT(*) AS volume_count
+                FROM series_volumes
+                GROUP BY series_url
+            ) AS counts ON counts.series_url = sv.series_url
+            LEFT JOIN books AS parent ON parent.url = sv.series_url
+            WHERE lower(sv.label) IN ({label_placeholders})
+            """,
+            all_labels,
+        ).fetchall()
+
+    result: dict[str, str] = {}
+    titles_by_url = dict(aggregate_candidates)
+    for url, labels in labels_by_url.items():
+        child_key = series_identity_key(titles_by_url[url], url)
+        related: dict[str, tuple[Any, int]] = {}
+        for row in matching_rows:
+            parent_url = row["series_url"]
+            if parent_url == url or row["label"] not in labels:
+                continue
+            if not series_keys_are_related(
+                child_key,
+                series_identity_key(row["title"], parent_url),
+            ):
+                continue
+            current = related.get(parent_url)
+            related[parent_url] = (
+                row,
+                (current[1] if current else 0) + 1,
+            )
+        eligible = [
+            (row, matching_labels)
+            for row, matching_labels in related.values()
+            if matching_labels >= 2
+        ]
+        if eligible:
+            result[url] = max(
+                eligible,
+                key=lambda item: (
+                    item[1],
+                    item[0]["volume_count"],
+                    item[0]["series_url"],
+                ),
+            )[0]["series_url"]
+    return result
+
+
 def aggregate_release_group(title: str, details: PostDetails) -> str:
     base = "Revised edition" if re.search(
         r"\bRevised Editions?\b",
@@ -5741,6 +5832,13 @@ def list_books(
         download_category_counts,
         primary_category_counts,
     ) = get_catalog_indexes()
+    aggregate_parent_urls = infer_aggregate_catalog_parents_from_db(
+        [
+            (book["url"], book["title"])
+            for book in books
+            if book["entry_type"] == "series"
+        ]
+    )
     for book in books:
         book["associated_names"] = decode_string_list(book["associated_names"])
         book["genres"] = decode_string_list(book["genres"])
@@ -5775,11 +5873,7 @@ def list_books(
             if book["entry_type"] == "volume"
             else book["url"] if book["entry_type"] == "series" else None
         )
-        aggregate_parent_url = (
-            infer_aggregate_catalog_parent_from_db(book["url"], book["title"])
-            if book["entry_type"] == "series"
-            else None
-        )
+        aggregate_parent_url = aggregate_parent_urls.get(book["url"])
         if aggregate_parent_url:
             series_url = aggregate_parent_url
         catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
