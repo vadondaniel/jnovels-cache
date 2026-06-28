@@ -21,6 +21,7 @@ from server_modules.storage import catalog_cache
 from server_modules.storage import cache_state
 from server_modules.storage import detail_queue
 from server_modules.storage import fallback_catalogs
+from server_modules.storage import legacy_volume_cleanup
 from server_modules.storage import metadata_store
 from server_modules.storage import series_parent_inference
 from server_modules.storage import series_index_store
@@ -195,6 +196,7 @@ __all__ = [
     "normalize_synopsis",
     "normalize_volume_designator",
     "normalize_volume_number",
+    "parse_book_identity",
     "qualify_format_release_group",
     "qualify_numbered_subseries_badge",
     "release_group_from_catalog_text",
@@ -559,168 +561,25 @@ def merge_explicit_alias_catalogs(
 
 
 def reconcile_legacy_volume_entries(*, force: bool = False) -> int:
-    with connect_db() as connection:
-        if not force and connection.execute(
-            "SELECT 1 FROM metadata WHERE key = ?",
-            (LEGACY_VOLUME_RECONCILE_KEY,),
-        ).fetchone():
-            return 0
-        rows = connection.execute(
-            """
-            SELECT title, url, download_url
-            FROM books
-            WHERE entry_type = 'series'
-            ORDER BY id
-            """
-        ).fetchall()
-
-    repaired = 0
-    for row in rows:
-        if is_aggregate_volume_title(row["title"], row["url"]):
-            continue
-        _, volume_label = parse_book_identity(row["title"], row["url"])
-        if not volume_label:
-            continue
-        parent_url = infer_series_parent(
-            row["url"],
-            download_url=row["download_url"],
-            volume_label_hint=re.sub(
-                r"^Vol\.\s+",
-                "Volume ",
-                volume_label,
-                flags=re.IGNORECASE,
-            ),
-        )
-        if not parent_url or not is_cached_series_url(parent_url):
-            continue
-        with connect_db() as connection:
-            connection.execute(
-                """
-                UPDATE books
-                SET entry_type = 'volume',
-                    original_post_url = ?
-                WHERE url = ?
-                """,
-                (parent_url, row["url"]),
-            )
-        reparent_series_alias(row["url"], parent_url)
-        repaired += 1
-
-    repaired += group_orphan_volume_families()
-
-    with connect_db() as connection:
-        connection.execute(
-            """
-            INSERT INTO metadata (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """,
-            (
-                LEGACY_VOLUME_RECONCILE_KEY,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            ),
-        )
-    return repaired
+    return legacy_volume_cleanup.reconcile_legacy_volume_entries(
+        force=force,
+        legacy_volume_reconcile_key=LEGACY_VOLUME_RECONCILE_KEY,
+        connect_db=connect_db,
+        is_aggregate_volume_title=is_aggregate_volume_title,
+        infer_series_parent=infer_series_parent,
+        is_cached_series_url=is_cached_series_url,
+        reparent_series_alias=reparent_series_alias,
+        build_fallback_catalog=build_fallback_catalog,
+    )
 
 
 def group_orphan_volume_families() -> int:
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT b.id, b.title, b.url, b.download_url, b.published_at,
-                   (
-                       SELECT COUNT(*)
-                       FROM series_volumes AS sv
-                       WHERE sv.series_url = b.url
-                   ) AS catalog_count
-            FROM books AS b
-            WHERE b.entry_type = 'series'
-              AND b.download_url IS NOT NULL
-            ORDER BY b.published_at IS NULL, b.published_at, b.id
-            """
-        ).fetchall()
-
-    families: dict[tuple[str, str, bool], list[sqlite3.Row]] = {}
-    for row in rows:
-        if is_aggregate_volume_title(row["title"], row["url"]):
-            continue
-        _, volume_label = parse_book_identity(row["title"], row["url"])
-        page_format = book_page_format(row["title"], row["url"])
-        identity = series_identity_key(row["title"], row["url"])
-        if not volume_label or page_format not in {"epub", "pdf", "mixed"} or not identity:
-            continue
-        is_webnovel = "webnovel" in f"{row['title']} {row['url']}".casefold()
-        families.setdefault((identity, page_format, is_webnovel), []).append(row)
-
-    grouped = 0
-    for family in families.values():
-        if len(family) < 2:
-            continue
-
-        def release_number(row: sqlite3.Row) -> float:
-            _, badge = parse_book_identity(row["title"], row["url"])
-            match = re.search(r"[0-9]+(?:\.[0-9]+)?", badge or "")
-            return float(match.group(0)) if match else float("inf")
-
-        canonical = min(
-            family,
-            key=lambda row: (
-                -(row["catalog_count"] > 1),
-                release_number(row),
-                row["published_at"] is None,
-                row["published_at"] or "",
-                row["id"],
-            ),
-        )
-        _, canonical_badge = parse_book_identity(
-            canonical["title"],
-            canonical["url"],
-        )
-        canonical_label = re.sub(
-            r"^Vol\.\s+",
-            "Volume ",
-            canonical_badge or "Volume 1",
-            flags=re.IGNORECASE,
-        )
-        with connect_db() as connection:
-            next_position = connection.execute(
-                """
-                SELECT COALESCE(MAX(position), -1) + 1
-                FROM series_volumes
-                WHERE series_url = ?
-                """,
-                (canonical["url"],),
-            ).fetchone()[0]
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO series_volumes
-                    (series_url, label, download_url, position, cached_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (
-                    canonical["url"],
-                    canonical_label,
-                    canonical["download_url"],
-                    next_position,
-                    datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                ),
-            )
-        for row in family:
-            if row["url"] == canonical["url"]:
-                continue
-            with connect_db() as connection:
-                connection.execute(
-                    """
-                    UPDATE books
-                    SET entry_type = 'volume',
-                        original_post_url = ?
-                    WHERE url = ?
-                    """,
-                    (canonical["url"], row["url"]),
-                )
-            reparent_series_alias(row["url"], canonical["url"])
-            grouped += 1
-        build_fallback_catalog(canonical["url"])
-    return grouped
+    return legacy_volume_cleanup.group_orphan_volume_families(
+        connect_db=connect_db,
+        is_aggregate_volume_title=is_aggregate_volume_title,
+        reparent_series_alias=reparent_series_alias,
+        build_fallback_catalog=build_fallback_catalog,
+    )
 
 
 def update_book_details(url: str, details: PostDetails) -> None:
