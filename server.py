@@ -2453,6 +2453,24 @@ def initialize_db() -> None:
         )
         connection.execute(
             """
+            CREATE INDEX IF NOT EXISTS idx_books_entry_type_published
+            ON books(entry_type, published_at DESC)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_series_preferences_flags
+            ON series_preferences(series_url, hidden, favorite)
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_series_volumes_download
+            ON series_volumes(download_url, position)
+            """
+        )
+        connection.execute(
+            """
             INSERT OR IGNORE INTO series_status (series_url, checked_at)
             SELECT series_url, MAX(cached_at)
             FROM series_volumes
