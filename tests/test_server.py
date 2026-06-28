@@ -2043,6 +2043,19 @@ class DatabaseTests(unittest.TestCase):
             },
         )
 
+    def test_filter_count_cache_refreshes_after_detail_update(self):
+        book = server.Book("Pending", "https://example/pending", None, None)
+        server.upsert_books([book])
+
+        self.assertEqual(server.count_book_filters()["pending"], 1)
+
+        server.update_book_details(
+            book.url,
+            server.PostDetails("series", None, "https://files.example/v1"),
+        )
+
+        self.assertEqual(server.count_book_filters()["pending"], 0)
+
     def test_series_preferences_apply_to_every_entry_and_remain_recoverable(self):
         series_url = "https://example/series"
         series = server.Book("Example Series", series_url, None, None)

@@ -78,6 +78,8 @@ _catalog_index_cache: tuple[
     dict[str, int],
     dict[str, int],
 ] | None = None
+_book_filter_counts_lock = threading.Lock()
+_book_filter_counts_cache: tuple[Path, dict[str, int]] | None = None
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -2109,7 +2111,10 @@ def delete_book_urls(
         f"DELETE FROM books WHERE url IN ({placeholders})",
         params,
     )
-    return connection.total_changes - before
+    deleted = connection.total_changes - before
+    if deleted:
+        invalidate_book_filter_counts()
+    return deleted
 
 
 def prune_pdf_duplicates(
@@ -2157,6 +2162,13 @@ def invalidate_catalog_indexes() -> None:
     global _catalog_index_cache
     with _catalog_index_lock:
         _catalog_index_cache = None
+    invalidate_book_filter_counts()
+
+
+def invalidate_book_filter_counts() -> None:
+    global _book_filter_counts_cache
+    with _book_filter_counts_lock:
+        _book_filter_counts_cache = None
 
 
 def get_catalog_indexes() -> tuple[
@@ -2912,6 +2924,7 @@ def add_series_index_candidates(books: list[Book]) -> list[str]:
             """,
             urls,
         )
+    invalidate_book_filter_counts()
     return urls
 
 
@@ -3485,6 +3498,7 @@ def update_book_details(url: str, details: PostDetails) -> None:
                 """,
                 (associated_names, genres, details.synopsis, url),
             )
+    invalidate_book_filter_counts()
     if orphaned_parent:
         merge_orphaned_catalog(
             orphaned_parent,
@@ -4623,6 +4637,8 @@ def reconcile_series_downloads(series_url: str) -> int:
             """,
             updates,
         )
+    if updates:
+        invalidate_book_filter_counts()
     return len(updates)
 
 
@@ -4933,6 +4949,7 @@ def set_series_preference(
             """,
             (series_url, next_favorite, next_hidden, now),
         )
+    invalidate_book_filter_counts()
     return {
         "series_url": series_url,
         "favorite": bool(next_favorite),
@@ -5648,6 +5665,14 @@ def count_books(
 
 
 def count_book_filters() -> dict[str, int]:
+    global _book_filter_counts_cache
+    with _book_filter_counts_lock:
+        if (
+            _book_filter_counts_cache is not None
+            and _book_filter_counts_cache[0] == DB_PATH
+        ):
+            return dict(_book_filter_counts_cache[1])
+
     with connect_db() as connection:
         row = connection.execute(
             """
@@ -5714,7 +5739,7 @@ def count_book_filters() -> dict[str, int]:
             FROM books
             """
         ).fetchone()
-    return {
+    counts = {
         "all": row["all_count"] or 0,
         "series": row["series_count"] or 0,
         "volumes": row["volume_count"] or 0,
@@ -5722,6 +5747,9 @@ def count_book_filters() -> dict[str, int]:
         "favorites": row["favorite_count"] or 0,
         "hidden": row["hidden_count"] or 0,
     }
+    with _book_filter_counts_lock:
+        _book_filter_counts_cache = (DB_PATH, counts)
+    return dict(counts)
 
 
 def list_books(
