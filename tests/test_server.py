@@ -1815,6 +1815,46 @@ class DatabaseTests(unittest.TestCase):
         self.assertEqual([book["title"] for book in books], ["100% Example"])
         self.assertEqual(count, 1)
 
+    def test_search_fts_index_tracks_titles_and_associated_names(self):
+        if not server.books_fts_available():
+            self.skipTest("SQLite FTS5 is unavailable")
+
+        book = server.Book(
+            "FTS Indexed Story",
+            "https://example/fts-indexed-story",
+            None,
+            None,
+        )
+        server.upsert_books([book])
+
+        with server.connect_db() as connection:
+            title_matches = connection.execute(
+                "SELECT COUNT(*) FROM books_fts WHERE books_fts MATCH ?",
+                ('"indexed"',),
+            ).fetchone()[0]
+        self.assertEqual(title_matches, 1)
+
+        server.update_book_details(
+            book.url,
+            server.PostDetails(
+                "series",
+                None,
+                "https://files.example/fts-indexed-story",
+                associated_names=["Alternate Lookup Name"],
+            ),
+        )
+
+        with server.connect_db() as connection:
+            associated_matches = connection.execute(
+                "SELECT COUNT(*) FROM books_fts WHERE books_fts MATCH ?",
+                ('"alternate lookup"',),
+            ).fetchone()[0]
+        self.assertEqual(associated_matches, 1)
+        self.assertEqual(
+            [result["url"] for result in server.list_books("Alternate Lookup", "title_asc")],
+            [book.url],
+        )
+
     def test_exact_url_lookup_ignores_title_and_visibility_filters(self):
         target = server.Book(
             "Title with Difficult: Punctuation!",

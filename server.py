@@ -80,6 +80,8 @@ _catalog_index_cache: tuple[
 ] | None = None
 _book_filter_counts_lock = threading.Lock()
 _book_filter_counts_cache: tuple[Path, dict[str, int]] | None = None
+_books_fts_lock = threading.Lock()
+_books_fts_available: tuple[Path, bool] | None = None
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -2171,6 +2173,70 @@ def invalidate_book_filter_counts() -> None:
         _book_filter_counts_cache = None
 
 
+def set_books_fts_available(available: bool) -> None:
+    global _books_fts_available
+    with _books_fts_lock:
+        _books_fts_available = (DB_PATH, available)
+
+
+def books_fts_available() -> bool:
+    with _books_fts_lock:
+        return (
+            _books_fts_available is not None
+            and _books_fts_available[0] == DB_PATH
+            and _books_fts_available[1]
+        )
+
+
+def initialize_books_fts(connection: sqlite3.Connection) -> bool:
+    try:
+        connection.executescript(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS books_fts USING fts5(
+                title,
+                associated_names,
+                content='books',
+                content_rowid='id',
+                tokenize='unicode61'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS books_fts_ai
+            AFTER INSERT ON books BEGIN
+                INSERT INTO books_fts(rowid, title, associated_names)
+                VALUES (new.id, new.title, COALESCE(new.associated_names, ''));
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS books_fts_ad
+            AFTER DELETE ON books BEGIN
+                INSERT INTO books_fts(books_fts, rowid, title, associated_names)
+                VALUES (
+                    'delete',
+                    old.id,
+                    old.title,
+                    COALESCE(old.associated_names, '')
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS books_fts_au
+            AFTER UPDATE OF title, associated_names ON books BEGIN
+                INSERT INTO books_fts(books_fts, rowid, title, associated_names)
+                VALUES (
+                    'delete',
+                    old.id,
+                    old.title,
+                    COALESCE(old.associated_names, '')
+                );
+                INSERT INTO books_fts(rowid, title, associated_names)
+                VALUES (new.id, new.title, COALESCE(new.associated_names, ''));
+            END;
+            """
+        )
+        connection.execute("INSERT INTO books_fts(books_fts) VALUES ('rebuild')")
+    except sqlite3.OperationalError:
+        return False
+    return True
+
+
 def get_catalog_indexes() -> tuple[
     dict[str, tuple[str, int]],
     dict[str, tuple[str, int]],
@@ -2469,6 +2535,7 @@ def initialize_db() -> None:
             ON series_volumes(download_url, position)
             """
         )
+        set_books_fts_available(initialize_books_fts(connection))
         connection.execute(
             """
             INSERT OR IGNORE INTO series_status (series_url, checked_at)
@@ -5567,6 +5634,68 @@ def parse_search_terms(query: str) -> list[str]:
     return terms
 
 
+def fts_query_for_term(term: str) -> str | None:
+    tokens = re.findall(r"\w+", term, flags=re.UNICODE)
+    if not tokens:
+        return None
+    escaped_tokens = [token.replace('"', '""') for token in tokens]
+    if len(escaped_tokens) == 1:
+        return f'"{escaped_tokens[0]}"'
+    return f'"{" ".join(escaped_tokens)}"'
+
+
+def book_fts_filter(
+    term: str,
+    *,
+    include_family_titles: bool,
+) -> tuple[str, tuple[str, ...]] | None:
+    fts_query = fts_query_for_term(term)
+    if not fts_query:
+        return None
+    conditions = [
+        """
+        books.id IN (
+            SELECT rowid
+            FROM books_fts
+            WHERE books_fts MATCH ?
+        )
+        """
+    ]
+    params = [fts_query]
+    if include_family_titles:
+        conditions.extend(
+            [
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM books AS parent
+                    WHERE parent.url = books.original_post_url
+                      AND parent.id IN (
+                          SELECT rowid
+                          FROM books_fts
+                          WHERE books_fts MATCH ?
+                      )
+                )
+                """,
+                """
+                EXISTS (
+                    SELECT 1
+                    FROM books AS sibling
+                    WHERE sibling.original_post_url =
+                          COALESCE(books.original_post_url, books.url)
+                      AND sibling.id IN (
+                          SELECT rowid
+                          FROM books_fts
+                          WHERE books_fts MATCH ?
+                      )
+                )
+                """,
+            ]
+        )
+        params.extend([fts_query, fts_query])
+    return f"({' OR '.join(conditions)})", tuple(params)
+
+
 def book_filter(
     query: str,
     entry_filter: str = "all",
@@ -5581,6 +5710,12 @@ def book_filter(
         for term in parse_search_terms(query):
             escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             if term.isdecimal():
+                if books_fts_available():
+                    fts_filter = book_fts_filter(term, include_family_titles=False)
+                    if fts_filter:
+                        condition, condition_params = fts_filter
+                        conditions.append(condition)
+                        params.extend(condition_params)
                 conditions.append(
                     """
                     (
@@ -5591,6 +5726,12 @@ def book_filter(
                 )
                 params.extend([f"%{escaped}%"] * 2)
                 continue
+            if books_fts_available():
+                fts_filter = book_fts_filter(term, include_family_titles=True)
+                if fts_filter:
+                    condition, condition_params = fts_filter
+                    conditions.append(condition)
+                    params.extend(condition_params)
             conditions.append(
                 """
                 (
