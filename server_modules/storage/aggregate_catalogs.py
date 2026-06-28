@@ -447,3 +447,67 @@ def merge_cached_aggregate_catalogs_into_parent(parent_url: str) -> int:
         changes += merge_aggregate_catalog_into_parent(parent_url, book["url"], details)
     return changes
 
+
+def reconcile_aggregate_volume_catalogs() -> int:
+    with connect_db() as connection:
+        rows = connection.execute(
+            """
+            SELECT title, url, original_post_url, download_url
+            FROM books
+            WHERE entry_type = 'volume'
+              AND original_post_url IS NOT NULL
+              AND download_url IS NOT NULL
+            """
+        ).fetchall()
+        candidates = [
+            row
+            for row in rows
+            if is_aggregate_volume_title(row["title"], row["url"])
+        ]
+        before = connection.total_changes
+        for row in candidates:
+            aggregate_label = extract_catalog_label(row["title"])
+            connection.execute(
+                """
+                UPDATE books
+                SET entry_type = 'series',
+                    original_post_url = NULL
+                WHERE url = ?
+                """,
+                (row["url"],),
+            )
+            if aggregate_label:
+                connection.execute(
+                    """
+                    DELETE FROM series_volumes
+                    WHERE series_url = ?
+                      AND lower(label) = lower(?)
+                      AND download_url = ?
+                    """,
+                    (
+                        row["original_post_url"],
+                        aggregate_label,
+                        row["download_url"],
+                    ),
+                )
+            connection.execute(
+                """
+                UPDATE series_status
+                SET metadata_checked_at = NULL
+                WHERE series_url = ?
+                """,
+                (row["url"],),
+            )
+        changes = connection.total_changes - before
+    affected_parents = {
+        row["original_post_url"]
+        for row in candidates
+        if row["original_post_url"]
+    }
+    for parent_url in affected_parents:
+        resequence_series_volumes(parent_url)
+    if changes:
+        invalidate_catalog_indexes()
+    return changes
+
+
