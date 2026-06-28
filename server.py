@@ -20,6 +20,7 @@ from server_modules.storage import cache_state
 from server_modules.storage import detail_queue
 from server_modules.storage import metadata_store
 from server_modules.storage import series_index_store
+from server_modules.storage import series_catalog_repository
 from server_modules.normalization.label_utils import (
     catalog_display_label,
     catalog_label_with_subtitle,
@@ -90,7 +91,6 @@ from server_modules.normalization.release_groups import (
 from server_modules.parsers.search_results import SearchResultsParser, normalize_date
 from server_modules.parsers.series_index import SeriesIndexParser
 from server_modules.normalization.title_utils import (
-    book_duplicate_key,
     book_page_format,
     is_distinct_subseries_title,
     is_named_subseries_title,
@@ -618,68 +618,23 @@ def delete_book_urls(
     connection: sqlite3.Connection,
     urls: set[str],
 ) -> int:
-    if not urls:
-        return 0
-    placeholders = ", ".join("?" for _ in urls)
-    params = tuple(sorted(urls))
-    connection.execute(
-        f"DELETE FROM series_volumes WHERE series_url IN ({placeholders})",
-        params,
+    return book_repository.delete_book_urls(
+        connection,
+        invalidate_book_filter_counts,
+        urls,
     )
-    connection.execute(
-        f"DELETE FROM series_status WHERE series_url IN ({placeholders})",
-        params,
-    )
-    before = connection.total_changes
-    connection.execute(
-        f"DELETE FROM books WHERE url IN ({placeholders})",
-        params,
-    )
-    deleted = connection.total_changes - before
-    if deleted:
-        invalidate_book_filter_counts()
-    return deleted
 
 
 def prune_pdf_duplicates(
     *,
     connection: sqlite3.Connection | None = None,
 ) -> int:
-    def prune(active_connection: sqlite3.Connection) -> int:
-        rows = active_connection.execute(
-            "SELECT title, url, original_post_url FROM books"
-        ).fetchall()
-        preferred_keys = {
-            book_duplicate_key(row["title"], row["url"])
-            for row in rows
-            if book_page_format(row["title"], row["url"]) in {"epub", "mixed"}
-        }
-        duplicate_urls = {
-            row["url"]
-            for row in rows
-            if book_page_format(row["title"], row["url"]) == "pdf"
-            and book_duplicate_key(row["title"], row["url"]) in preferred_keys
-        }
-        duplicate_series_urls = {
-            row["url"]
-            for row in rows
-            if row["url"] in duplicate_urls and not row["original_post_url"]
-        }
-        duplicate_urls.update(
-            row["url"]
-            for row in rows
-            if row["original_post_url"] in duplicate_series_urls
-            and book_page_format(row["title"], row["url"]) == "pdf"
-        )
-        deleted = delete_book_urls(active_connection, duplicate_urls)
-        if deleted:
-            invalidate_catalog_indexes()
-        return deleted
-
-    if connection is not None:
-        return prune(connection)
-    with connect_db() as active_connection:
-        return prune(active_connection)
+    return book_repository.prune_pdf_duplicates(
+        connect_db,
+        invalidate_book_filter_counts,
+        invalidate_catalog_indexes,
+        connection=connection,
+    )
 
 
 def _configure_catalog_cache() -> None:
@@ -780,7 +735,7 @@ def initialize_db() -> None:
 def upsert_books(books: list[Book], source_page: int | None = None) -> int:
     return book_repository.upsert_books(
         connect_db,
-        prune_pdf_duplicates,
+        invalidate_book_filter_counts,
         invalidate_catalog_indexes,
         books,
         source_page,
@@ -1590,56 +1545,12 @@ def validate_post_details(details: PostDetails) -> None:
 
 
 def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None:
-    normalized_volumes: list[SeriesVolume] = []
-    seen_downloads: set[str] = set()
-    for volume in volumes:
-        if volume.download_url in seen_downloads:
-            continue
-        seen_downloads.add(volume.download_url)
-        normalized_volumes.append(
-            SeriesVolume(
-                volume.label,
-                volume.download_url,
-                len(normalized_volumes),
-                volume.release_group,
-            )
-        )
-
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        connection.execute(
-            "DELETE FROM series_volumes WHERE series_url = ?",
-            (series_url,),
-        )
-        connection.executemany(
-            """
-            INSERT INTO series_volumes
-                (series_url, label, download_url, position, cached_at, release_group)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    series_url,
-                    volume.label,
-                    volume.download_url,
-                    volume.position,
-                    now,
-                    volume.release_group,
-                )
-                for volume in normalized_volumes
-            ],
-        )
-        connection.execute(
-            """
-            INSERT INTO series_status (series_url, checked_at)
-            VALUES (?, ?)
-            ON CONFLICT(series_url) DO UPDATE
-            SET checked_at = excluded.checked_at,
-                unavailable_at = NULL
-            """,
-            (series_url, now),
-        )
-    invalidate_catalog_indexes()
+    series_catalog_repository.replace_series_volumes(
+        connect_db,
+        invalidate_catalog_indexes,
+        series_url,
+        volumes,
+    )
 
 
 def apply_series_release_group_override(
@@ -1800,35 +1711,11 @@ def merge_orphaned_catalog(
 
 
 def mark_series_metadata_checked(series_url: str, checked_at: str | None = None) -> None:
-    checked_at = checked_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        connection.execute(
-            """
-            INSERT INTO series_status (series_url, checked_at, metadata_checked_at)
-            VALUES (?, ?, ?)
-            ON CONFLICT(series_url) DO UPDATE
-            SET metadata_checked_at = excluded.metadata_checked_at,
-                unavailable_at = NULL
-            """,
-            (series_url, checked_at, checked_at),
-        )
+    cache_state.mark_series_metadata_checked(connect_db, series_url, checked_at)
 
 
 def mark_series_unavailable(series_url: str) -> None:
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with connect_db() as connection:
-        connection.execute(
-            """
-            INSERT INTO series_status
-                (series_url, checked_at, metadata_checked_at, unavailable_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(series_url) DO UPDATE
-            SET checked_at = excluded.checked_at,
-                metadata_checked_at = excluded.metadata_checked_at,
-                unavailable_at = excluded.unavailable_at
-            """,
-            (series_url, now, now, now),
-        )
+    cache_state.mark_series_unavailable(connect_db, series_url)
 
 
 def build_fallback_catalog(
@@ -1925,136 +1812,16 @@ def build_fallback_catalog(
 
 
 def resequence_series_volumes(series_url: str) -> None:
-    with connect_db() as connection:
-        rows = connection.execute(
-            """
-            SELECT sv.id, sv.label, sv.position, sv.release_group,
-                   EXISTS (
-                       SELECT 1 FROM books AS child
-                       WHERE child.download_url = sv.download_url
-                         AND (child.url = sv.series_url OR child.original_post_url = sv.series_url)
-                   ) AS has_post
-            FROM series_volumes AS sv
-            WHERE sv.series_url = ?
-            ORDER BY position, id
-            """,
-            (series_url,),
-        ).fetchall()
-        retained: dict[tuple[str, str], sqlite3.Row] = {}
-        normalized_labels: dict[int, str] = {}
-        discarded: set[int] = set()
-        for row in rows:
-            legacy = re.search(r"\s([0-9]+(?:\.[0-9]+)?)_\s*\S", row["label"])
-            label = (
-                f"Volume {normalize_volume_number(legacy.group(1))}"
-                if legacy
-                else row["label"]
-            )
-            normalized_labels[row["id"]] = label
-            key = ((row["release_group"] or "").casefold(), label.casefold())
-            existing = retained.get(key)
-            if existing is None or row["has_post"] > existing["has_post"]:
-                if existing is not None:
-                    discarded.add(existing["id"])
-                retained[key] = row
-            else:
-                discarded.add(row["id"])
-        if discarded:
-            connection.executemany(
-                "DELETE FROM series_volumes WHERE id = ?",
-                [(row_id,) for row_id in discarded],
-            )
-        connection.executemany(
-            "UPDATE series_volumes SET label = ? WHERE id = ?",
-            [
-                (normalized_labels[row["id"]], row["id"])
-                for row in retained.values()
-                if normalized_labels[row["id"]] != row["label"]
-            ],
-        )
-        rows = list(retained.values())
-        group_order: dict[str, int] = {}
-        for row in rows:
-            group_key = (row["release_group"] or "").casefold()
-            group_order.setdefault(group_key, len(group_order))
-
-        def volume_order(row: sqlite3.Row) -> tuple[int, int, int, float, int]:
-            group_key = (row["release_group"] or "").casefold()
-            label = normalized_labels[row["id"]]
-            year = re.search(r"\bYear\s+([0-9]+)\b", label, re.IGNORECASE)
-            volume_match = re.search(
-                r"\b(?:Volume|Vol\.)\s+([0-9]+(?:\.[0-9]+)?)",
-                label,
-                re.IGNORECASE,
-            )
-            part_match = re.search(
-                r"\bPart\s+([0-9]+(?:\.[0-9]+)?)",
-                label,
-                re.IGNORECASE,
-            )
-            number = volume_match or part_match
-            label_kind = 0 if volume_match else 2 if part_match else 1
-            return (
-                group_order[group_key],
-                int(year.group(1)) if year else 1,
-                label_kind,
-                float(number.group(1)) if number else float("inf"),
-                row["position"],
-            )
-
-        ordered = sorted(rows, key=volume_order)
-        connection.executemany(
-            "UPDATE series_volumes SET position = ? WHERE id = ?",
-            [(position, row["id"]) for position, row in enumerate(ordered)],
-        )
+    series_catalog_repository.resequence_series_volumes(connect_db, series_url)
 
 
 def relabel_catalog_entries_from_books(series_url: str | None = None) -> int:
-    where_clause = "WHERE sv.series_url = ?" if series_url else ""
-    params: tuple[str, ...] = (series_url,) if series_url else ()
-    with connect_db() as connection:
-        rows = connection.execute(
-            f"""
-            SELECT sv.id, sv.label, sv.series_url,
-                   child.title AS child_title, child.url AS child_url
-            FROM series_volumes AS sv
-            JOIN books AS child ON child.download_url = sv.download_url
-                AND (
-                    child.url = sv.series_url
-                    OR child.original_post_url = sv.series_url
-                )
-            {where_clause}
-            ORDER BY sv.id,
-                     child.url = sv.series_url DESC,
-                     child.published_at DESC,
-                     child.id DESC
-            """,
-            params,
-        ).fetchall()
-        corrections = []
-        affected_series: set[str] = set()
-        seen_ids: set[int] = set()
-        for row in rows:
-            if row["id"] in seen_ids:
-                continue
-            seen_ids.add(row["id"])
-            if is_aggregate_volume_title(row["child_title"], row["child_url"]):
-                continue
-            label = extract_catalog_label(row["child_title"])
-            current_label = extract_catalog_label(row["label"]) or row["label"]
-            if label and label.casefold() != current_label.casefold():
-                corrections.append((label, row["id"]))
-                affected_series.add(row["series_url"])
-        if corrections:
-            connection.executemany(
-                "UPDATE series_volumes SET label = ? WHERE id = ?",
-                corrections,
-            )
-    if corrections:
-        for affected_url in affected_series:
-            resequence_series_volumes(affected_url)
-        invalidate_catalog_indexes()
-    return len(corrections)
+    return series_catalog_repository.relabel_catalog_entries_from_books(
+        connect_db,
+        is_aggregate_volume_title,
+        invalidate_catalog_indexes,
+        series_url,
+    )
 
 
 def build_missing_fallback_catalogs() -> int:

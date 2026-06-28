@@ -198,6 +198,42 @@ def get_series_refresh_urls(
     return urls
 
 
+def mark_series_metadata_checked(
+    connect_db: ConnectDb,
+    series_url: str,
+    checked_at: str | None = None,
+) -> None:
+    checked_at = checked_at or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO series_status (series_url, checked_at, metadata_checked_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(series_url) DO UPDATE
+            SET metadata_checked_at = excluded.metadata_checked_at,
+                unavailable_at = NULL
+            """,
+            (series_url, checked_at, checked_at),
+        )
+
+
+def mark_series_unavailable(connect_db: ConnectDb, series_url: str) -> None:
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with connect_db() as connection:
+        connection.execute(
+            """
+            INSERT INTO series_status
+                (series_url, checked_at, metadata_checked_at, unavailable_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(series_url) DO UPDATE
+            SET checked_at = excluded.checked_at,
+                metadata_checked_at = excluded.metadata_checked_at,
+                unavailable_at = excluded.unavailable_at
+            """,
+            (series_url, now, now, now),
+        )
+
+
 def list_repair_failures(
     connect_db: ConnectDb,
     limit: int = 100,

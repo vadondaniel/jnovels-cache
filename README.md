@@ -47,10 +47,10 @@ recovers that progress when restarted.
 
 ## Local Data
 
-Cached data is stored in `jnovels_cache.db`.
+Cached data is stored in `jnovels_cache.sqlite`.
 
-- To back up the cache, stop the app and copy `jnovels_cache.db`.
-- To reset the cache, stop the app and delete `jnovels_cache.db`.
+- To back up the cache, stop the app and copy `jnovels_cache.sqlite`.
+- To reset the cache, stop the app and delete `jnovels_cache.sqlite`.
 
 ## Troubleshooting
 

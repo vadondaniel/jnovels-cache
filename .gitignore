@@ -1,3 +1,3 @@
 __pycache__/
 *.pyc
-jnovels_cache.db
+jnovels_cache.sqlite
