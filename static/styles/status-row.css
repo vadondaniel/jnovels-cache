@@ -1,0 +1,90 @@
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 76px;
+  border-bottom: 1px solid var(--line);
+}
+
+.status-row strong { margin-right: 12px; font: 600 1rem var(--font-serif); }
+.status-row span { color: var(--muted); font-size: .78rem; }
+
+.sync-status {
+  position: relative;
+  color: var(--muted);
+  cursor: help;
+  font-size: .8rem;
+}
+
+.sync-status:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 4px;
+}
+
+.sync-status .sync-status__detail {
+  position: absolute;
+  z-index: var(--layer-popover);
+  top: calc(100% + 10px);
+  right: 0;
+  width: max-content;
+  max-width: min(300px, calc(100vw - 32px));
+  padding: 10px 12px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-popover);
+  font-size: .75rem;
+  line-height: 1.55;
+  opacity: 0;
+  pointer-events: none;
+  text-align: left;
+  transform: translateY(-3px);
+  transition: opacity var(--motion-fast), transform var(--motion-fast);
+  white-space: pre-line;
+}
+
+.sync-status.is-running:hover .sync-status__detail,
+.sync-status.is-running:focus .sync-status__detail {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.status-row__activity {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+}
+
+.cache-health {
+  padding: 5px 9px;
+  color: var(--gold-text);
+  background: rgba(215, 173, 75, .12);
+  border: 1px solid rgba(139, 104, 29, .24);
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  font-size: .72rem;
+  font-weight: 750;
+}
+
+.cache-health:hover {
+  color: var(--ink);
+  border-color: var(--gold);
+}
+
+.cache-health[hidden] { display: none; }
+
+.sync-status.is-running::before {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 8px;
+  border-radius: 50%;
+  background: var(--gold);
+  box-shadow: 0 0 0 5px rgba(212,169,66,.15);
+  content: "";
+  animation: pulse 1.2s infinite;
+}
+
+@keyframes pulse { 50% { opacity: .4; } }

@@ -1,0 +1,31 @@
+.entry-filters {
+  display: inline-flex;
+  padding: 3px;
+  background: var(--filter-surface);
+  border-radius: var(--radius-sm);
+}
+
+.entry-filters[hidden],
+.entry-filters button[hidden] {
+  display: none;
+}
+
+.entry-filters button {
+  min-height: 28px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-size: .72rem;
+  font-weight: 700;
+}
+
+.entry-filters button:hover { color: var(--ink); }
+
+.entry-filters button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--surface-raised);
+  box-shadow: 0 1px 3px rgba(30, 25, 16, .12);
+}
