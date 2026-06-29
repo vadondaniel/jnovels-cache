@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from server_modules.domain.models import Book
 
@@ -12,7 +13,7 @@ def collect_sync_books(
     delay: float,
     known_urls: set[str],
     *,
-    sync_state: dict[str, object],
+    sync_state: dict[str, Any],
     fetch_page: Callable[[int], list[Book]],
     sleep: Callable[[float], None],
     on_page: Callable[[int, list[Book]], None] | None = None,

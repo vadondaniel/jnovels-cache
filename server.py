@@ -27,6 +27,11 @@ from server_modules.storage import series_parent_inference
 from server_modules.storage import series_index_store
 from server_modules.storage import series_catalog_repository
 from server_modules.sync.collection import collect_sync_books as collect_sync_books_impl
+from server_modules.sync.runner import (
+    SyncRunnerConfig,
+    SyncRunnerDeps,
+    run_sync_worker,
+)
 from server_modules.normalization.label_utils import (
     catalog_display_label,
     catalog_label_with_subtitle,
@@ -215,6 +220,7 @@ _catalog_index_cache: tuple[
 ] | None = None
 _books_fts_lock = threading.Lock()
 _books_fts_available: tuple[Path, bool] | None = None
+_URLError = urllib.error.URLError
 
 
 def parse_positive_int(value: str, default: int) -> int:
@@ -1183,249 +1189,51 @@ def run_sync(
     if not lock_acquired and not sync_lock.acquire(blocking=False):
         return
 
-    initial_cache_signature: str | None = None
-    completion_notice: str | None = None
     try:
-        set_sync_started(start_page, max_pages, delay, mode)
-        initial_cache_signature = cache_content_signature()
-        checkpoint: dict[str, Any] = {
-            "version": 1,
-            "status": "active",
-            "mode": mode,
-            "start_page": start_page,
-            "max_pages": max_pages,
-            "delay": delay,
-            "phase": "details" if detail_urls_override is not None else "search",
-            "page": start_page,
-            "pages_completed": 0,
-            "pending_detail_urls": list(dict.fromkeys(detail_urls_override or [])),
-            "pending_series_urls": list(dict.fromkeys(series_urls_override or [])),
-            "started_at": sync_state["started_at"],
-            "recovery": recovery,
-        }
-        save_sync_checkpoint(checkpoint)
-
-        scheduled_series_urls: set[str] = set(series_urls_override or [])
-        if detail_urls_override is not None:
-            books = []
-            detail_urls = list(dict.fromkeys(detail_urls_override))
-        elif mode == "series_refresh":
-            books = []
-            detail_urls = []
-            scheduled_series_urls.update(get_series_refresh_urls(max_pages))
-        elif mode == "repair":
-            books: list[Book] = []
-            detail_urls = get_incomplete_detail_urls(max_pages)
-        elif mode == "series_discovery":
-            books = []
-            sync_state["phase"] = "index"
-            sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
-            index_entries = fetch_series_index()
-            index_total, index_new = store_series_index(index_entries)
-            detail_urls = add_series_index_candidates(
-                get_series_index_candidates(max_pages)
-            )
-            completion_notice = (
-                f"Checked {index_total} indexed series"
-                + (f"; {index_new} new to the index." if index_new else ".")
-            )
-        else:
-            known_urls = get_cached_urls()
-            scan_frontier = get_search_scan_frontier()
-            applied_front_shift = 0
-
-            def persist_page(page: int, page_books: list[Book]) -> None:
-                nonlocal applied_front_shift, scan_frontier
-                previous_orders = get_book_source_orders(
-                    [book.url for book in page_books]
-                )
-                observed_shift = observed_source_page_shift(page, previous_orders)
-                scan_frontier, applied_front_shift = apply_observed_front_shift(
-                    scan_frontier,
-                    applied_front_shift,
-                    observed_shift,
-                )
-                upsert_books(page_books, source_page=page)
-                if page_books and page <= scan_frontier + 1:
-                    scan_frontier = max(scan_frontier, page)
-                    set_metadata("search_scan_frontier", str(scan_frontier))
-                cached_urls = get_cached_urls()
-                page_books[:] = [
-                    book for book in page_books if book.url in cached_urls
-                ]
-                pending = checkpoint["pending_detail_urls"]
-                pending.extend(book.url for book in page_books if book.url not in pending)
-                sync_state["queued_details"] = len(pending)
-                checkpoint["page"] = page
-                checkpoint["pages_completed"] = sync_state["pages_completed"]
-                save_sync_checkpoint(checkpoint)
-
-            books = collect_sync_books(
-                mode,
-                start_page,
-                max_pages,
-                delay,
-                known_urls,
-                persist_page,
-                scan_frontier,
-            )
-            cached_urls = get_cached_urls()
-            detail_urls = list(
-                dict.fromkeys(
-                    book.url for book in books if book.url in cached_urls
-                )
-            )
-            detail_urls.extend(
-                get_incomplete_detail_urls(
-                    AUTO_REPAIR_LIMIT,
-                    max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
-                    exclude_urls=set(detail_urls),
-                )
-            )
-            scheduled_series_urls.update(get_series_refresh_urls(AUTO_SERIES_REFRESH_LIMIT))
-            if series_index_is_initialized():
-                if series_index_refresh_due():
-                    try:
-                        store_series_index(fetch_series_index())
-                    except (
-                        urllib.error.URLError,
-                        TimeoutError,
-                        OSError,
-                        ValueError,
-                    ):
-                        pass
-                index_candidates = get_series_index_candidates(
-                    AUTO_SERIES_INDEX_LIMIT
-                )
-                detail_urls.extend(add_series_index_candidates(index_candidates))
-                detail_urls = list(dict.fromkeys(detail_urls))
-        sync_state["phase"] = "details"
-        sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
+        run_sync_worker(
+            start_page,
+            max_pages,
+            delay,
+            mode,
+            detail_urls_override,
+            series_urls_override,
+            recovery,
+            config=SyncRunnerConfig(
+                auto_repair_limit=AUTO_REPAIR_LIMIT,
+                auto_repair_max_attempts=AUTO_REPAIR_MAX_ATTEMPTS,
+                auto_series_index_limit=AUTO_SERIES_INDEX_LIMIT,
+                auto_series_refresh_limit=AUTO_SERIES_REFRESH_LIMIT,
+            ),
+            deps=SyncRunnerDeps(
+                sync_state=sync_state,
+                set_sync_started=set_sync_started,
+                cache_content_signature=cache_content_signature,
+                save_sync_checkpoint=save_sync_checkpoint,
+                clear_sync_checkpoint=clear_sync_checkpoint,
+                get_series_refresh_urls=get_series_refresh_urls,
+                get_incomplete_detail_urls=get_incomplete_detail_urls,
+                fetch_series_index=fetch_series_index,
+                store_series_index=store_series_index,
+                add_series_index_candidates=add_series_index_candidates,
+                get_series_index_candidates=get_series_index_candidates,
+                get_cached_urls=get_cached_urls,
+                get_search_scan_frontier=get_search_scan_frontier,
+                get_book_source_orders=get_book_source_orders,
+                observed_source_page_shift=observed_source_page_shift,
+                apply_observed_front_shift=apply_observed_front_shift,
+                upsert_books=upsert_books,
+                set_metadata=set_metadata,
+                delete_metadata=delete_metadata,
+                collect_sync_books=collect_sync_books,
+                series_index_is_initialized=series_index_is_initialized,
+                series_index_refresh_due=series_index_refresh_due,
+                fetch_post_details=fetch_post_details,
+                validate_post_details=validate_post_details,
+                update_book_details=update_book_details,
+                record_detail_failure=record_detail_failure,
+                sleep=time.sleep,
+            ),
         )
-        sync_state["details_total"] = len(detail_urls)
-        sync_state["queued_details"] = len(detail_urls)
-        sync_state["queued_series"] = len(scheduled_series_urls)
-        checkpoint["phase"] = "details"
-        checkpoint["pending_detail_urls"] = list(dict.fromkeys(detail_urls))
-        checkpoint["pending_series_urls"] = sorted(scheduled_series_urls)
-        save_sync_checkpoint(checkpoint)
-        discovered_series_urls: set[str] = set()
-        detail_url_set = set(detail_urls)
-        for index, url in enumerate(detail_urls):
-            time.sleep(delay)
-            completed = False
-            try:
-                details = fetch_post_details(url)
-                validate_post_details(details)
-                update_book_details(url, details)
-                if details.entry_type == "series":
-                    discovered_series_urls.add(url)
-                elif details.original_post_url:
-                    discovered_series_urls.add(details.original_post_url)
-                completed = True
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-                ValueError,
-                sqlite3.Error,
-            ) as exc:
-                record_detail_failure(url, exc)
-                sync_state["detail_errors"] += 1
-                completed = True
-            finally:
-                if completed:
-                    sync_state["details_completed"] += 1
-                    sync_state["queued_details"] = len(detail_urls) - index - 1
-                    sync_state["queued_series"] = len(
-                        (scheduled_series_urls | discovered_series_urls)
-                        - detail_url_set
-                    )
-                    checkpoint["pending_detail_urls"] = detail_urls[index + 1 :]
-                    checkpoint["pending_series_urls"] = sorted(
-                        scheduled_series_urls | discovered_series_urls
-                    )
-                    save_sync_checkpoint(checkpoint)
-
-        missing_series_urls = sorted(
-            (discovered_series_urls | scheduled_series_urls) - detail_url_set
-        )
-        sync_state["phase"] = "series"
-        sync_state["phase_started_at"] = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
-        sync_state["series_total"] = len(missing_series_urls)
-        sync_state["queued_series"] = len(missing_series_urls)
-        checkpoint["phase"] = "series"
-        checkpoint["pending_detail_urls"] = []
-        checkpoint["pending_series_urls"] = missing_series_urls
-        save_sync_checkpoint(checkpoint)
-        for index, series_url in enumerate(missing_series_urls):
-            time.sleep(delay)
-            completed = False
-            try:
-                details = fetch_post_details(series_url)
-                validate_post_details(details)
-                update_book_details(series_url, details)
-                completed = True
-            except (
-                urllib.error.URLError,
-                TimeoutError,
-                OSError,
-                ValueError,
-                sqlite3.Error,
-            ) as exc:
-                record_detail_failure(series_url, exc)
-                sync_state["series_errors"] += 1
-                completed = True
-            finally:
-                if completed:
-                    sync_state["series_completed"] += 1
-                    sync_state["queued_series"] = len(missing_series_urls) - index - 1
-                    checkpoint["pending_series_urls"] = missing_series_urls[index + 1 :]
-                    save_sync_checkpoint(checkpoint)
-
-        finished = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        sync_state["cache_changed"] = (
-            cache_content_signature() != initial_cache_signature
-        )
-        sync_state["finished_at"] = finished
-        sync_state["phase"] = None
-        sync_state["phase_started_at"] = None
-        sync_state["queued_details"] = 0
-        sync_state["queued_series"] = 0
-        if recovery:
-            sync_state["notice"] = (
-                "Recovered saved work from an interrupted sync; "
-                "the original search may have stopped early."
-            )
-            set_metadata("last_sync_recovered_at", finished)
-        else:
-            if sync_state["search_end_page"] is not None:
-                sync_state["notice"] = (
-                    "Reached the end of JNovels search results "
-                    f"at page {sync_state['search_end_page']}."
-                )
-            elif completion_notice:
-                sync_state["notice"] = completion_notice
-            set_metadata("last_sync_at", finished)
-            set_metadata("last_sync_pages", str(sync_state["pages_completed"]))
-            set_metadata("last_detail_errors", str(sync_state["detail_errors"]))
-            set_metadata("last_series_errors", str(sync_state["series_errors"]))
-            delete_metadata("last_sync_interrupted_at")
-        clear_sync_checkpoint()
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        if initial_cache_signature is not None:
-            sync_state["cache_changed"] = (
-                cache_content_signature() != initial_cache_signature
-            )
-        sync_state["error"] = str(exc)
-        sync_state["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        sync_state["phase"] = None
-        sync_state["phase_started_at"] = None
     finally:
         sync_state["running"] = False
         sync_lock.release()
