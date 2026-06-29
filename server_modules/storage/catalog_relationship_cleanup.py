@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import urllib.parse
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 
@@ -179,7 +179,7 @@ def reconcile_catalog_relationships(
 def cleanup_misclassified_series_tracking(
     *,
     base_url: str,
-    excluded_search_paths: tuple[str, ...],
+    excluded_search_paths: Iterable[str],
     connect_db: ConnectDb,
     reparent_series_alias: Callable[..., int],
     infer_series_parent: Callable[..., str | None],
