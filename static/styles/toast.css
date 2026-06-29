@@ -1,0 +1,19 @@
+.toast {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  z-index: var(--layer-toast);
+  max-width: min(380px, calc(100% - 44px));
+  padding: 13px 17px;
+  color: white;
+  background: var(--toast-bg);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-panel);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(10px);
+  transition: opacity .2s, transform .2s;
+}
+
+.toast.is-visible { opacity: 1; transform: none; }
+.toast.is-error { background: var(--error-bg); }
