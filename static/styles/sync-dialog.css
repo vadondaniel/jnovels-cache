@@ -1,0 +1,104 @@
+.sync-dialog {
+  width: min(560px, calc(100% - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+}
+
+.sync-dialog__header {
+  padding: 26px var(--space-7) 22px;
+}
+
+.sync-dialog .modal__title {
+  font-size: clamp(1.7rem, 5vw, 2.2rem);
+  line-height: 1;
+}
+
+.sync-dialog .modal__summary {
+  margin: 9px 0 0;
+  font-size: .9rem;
+}
+
+.sync-dialog__form { padding: 22px var(--space-7) 26px; }
+
+.sync-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.sync-field[hidden] { display: none; }
+
+.sync-field > span {
+  color: var(--muted);
+  font-size: .72rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+.sync-field input,
+.sync-field select {
+  width: 100%;
+  height: 46px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font: inherit;
+}
+
+.sync-field input:focus,
+.sync-field select:focus {
+  outline: none;
+  border-color: var(--gold);
+  box-shadow: var(--focus-ring);
+}
+
+.sync-dialog__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.sync-field__unit { position: relative; }
+.sync-field__unit input { padding-right: 48px; }
+
+.sync-field__unit span {
+  position: absolute;
+  top: 50%;
+  right: 13px;
+  color: var(--muted);
+  font-size: .78rem;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.sync-dialog__help {
+  margin: 18px 0 0;
+  padding: 12px 14px;
+  color: var(--muted);
+  background: var(--paper);
+  border-left: 3px solid var(--gold);
+  font-size: .85rem;
+  line-height: 1.45;
+}
+
+.sync-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+
+.button--quiet {
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+}
+
+.button--quiet:hover {
+  color: var(--ink);
+  border-color: var(--muted);
+}

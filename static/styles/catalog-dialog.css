@@ -1,0 +1,226 @@
+.catalog-dialog {
+  width: min(680px, calc(100% - 32px));
+  max-height: calc(100vh - 48px);
+  max-height: calc(100dvh - 48px);
+}
+
+.catalog-dialog[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.catalog-dialog__content {
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--surface);
+}
+
+.catalog-dialog__list {
+  background: var(--surface);
+}
+
+.catalog-dialog__details {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-raised);
+}
+
+.catalog-dialog__details[hidden] { display: none; }
+
+.catalog-dialog__details summary {
+  padding: 14px 24px;
+  color: var(--gold-dark);
+  cursor: pointer;
+  font-size: .76rem;
+  font-weight: 750;
+  list-style-position: inside;
+}
+
+.catalog-dialog__details summary:hover {
+  color: var(--ink);
+}
+
+.catalog-dialog__details > div {
+  padding: 0 24px 22px;
+}
+
+.catalog-dialog__details section + section {
+  margin-top: 20px;
+}
+
+.catalog-dialog__details h3 {
+  margin: 0 0 10px;
+  color: var(--gold-dark);
+  font-size: .7rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.catalog-dialog__details ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 20px;
+  color: var(--muted);
+  font-size: .86rem;
+}
+
+.catalog-dialog__group + .catalog-dialog__group {
+  border-top: 1px solid var(--line);
+}
+
+.catalog-dialog__group h3 {
+  margin: 0;
+  padding: 14px 16px 11px;
+  color: var(--gold-dark);
+  background: var(--group-surface);
+  font-size: .69rem;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+}
+
+.catalog-dialog__volume-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  padding: 1px;
+  background: var(--line);
+}
+
+.catalog-dialog__volume-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 52px;
+  padding: 12px 14px;
+  border: 0;
+  color: var(--ink);
+  background: var(--surface-raised);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: .82rem;
+  font-weight: 700;
+  text-align: left;
+  text-decoration: none;
+}
+
+.catalog-dialog__volume-link > span:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.catalog-dialog__volume-grid strong {
+  font-size: .82rem;
+}
+
+.catalog-dialog__volume-grid small {
+  color: var(--muted);
+  font-size: .66rem;
+  font-weight: 500;
+}
+
+.catalog-dialog__volume-grid small.is-known {
+  color: var(--gold-dark);
+}
+
+.catalog-dialog__link-kind {
+  flex: none;
+  color: var(--gold-dark);
+  font-size: .64rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.catalog-dialog__volume-link:hover,
+.catalog-dialog__volume-link:focus-visible {
+  color: var(--gold-dark);
+  background: var(--hover-surface);
+  outline: none;
+}
+
+.catalog-dialog__volume-grid.is-related {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.catalog-dialog__related-entry {
+  display: flex;
+  min-width: 0;
+  min-height: 104px;
+  padding: 14px;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--group-surface);
+}
+
+.catalog-dialog__related-info {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.catalog-dialog__related-info strong {
+  font: 600 .86rem/1.25 var(--font-serif);
+}
+
+.catalog-dialog__related-info small {
+  color: var(--muted);
+  font-size: .67rem;
+  font-weight: 500;
+}
+
+.catalog-dialog__related-info small.is-known {
+  color: var(--gold-dark);
+}
+
+.catalog-dialog__related-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.catalog-dialog__related-actions button,
+.catalog-dialog__related-actions a {
+  padding: 0;
+  border: 0;
+  color: var(--gold-dark);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: .68rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.catalog-dialog__related-actions button {
+  padding: 6px 9px;
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-xs);
+  color: var(--ink);
+  background: var(--gold-wash);
+}
+
+.catalog-dialog__related-actions button:hover,
+.catalog-dialog__related-actions button:focus-visible,
+.catalog-dialog__related-actions a:hover,
+.catalog-dialog__related-actions a:focus-visible {
+  color: var(--ink);
+  outline: none;
+}
+
+.catalog-dialog__footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--line);
+  text-align: right;
+}
+
+.catalog-dialog__footer a {
+  color: var(--gold-dark);
+  font-size: .78rem;
+  font-weight: 750;
+  text-decoration: none;
+}
