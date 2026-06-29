@@ -167,6 +167,7 @@ def count_books(
 
 def count_book_filters() -> dict[str, int]:
     global _book_filter_counts_cache
+    assert DB_PATH is not None
     with _book_filter_counts_lock:
         if (
             _book_filter_counts_cache is not None
@@ -240,13 +241,13 @@ def count_book_filters() -> dict[str, int]:
             FROM books
             """
         ).fetchone()
-    counts = {
-        "all": row["all_count"] or 0,
-        "series": row["series_count"] or 0,
-        "volumes": row["volume_count"] or 0,
-        "pending": row["pending_count"] or 0,
-        "favorites": row["favorite_count"] or 0,
-        "hidden": row["hidden_count"] or 0,
+    counts: dict[str, int] = {
+        "all": int(row["all_count"] or 0),
+        "series": int(row["series_count"] or 0),
+        "volumes": int(row["volume_count"] or 0),
+        "pending": int(row["pending_count"] or 0),
+        "favorites": int(row["favorite_count"] or 0),
+        "hidden": int(row["hidden_count"] or 0),
     }
     with _book_filter_counts_lock:
         _book_filter_counts_cache = (DB_PATH, counts)
