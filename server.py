@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import sqlite3
 import sys
 import threading
@@ -20,6 +19,7 @@ from server_modules.storage import catalog_cache
 from server_modules.storage import catalog_relationship_cleanup
 from server_modules.storage import cache_state
 from server_modules.storage import detail_queue
+from server_modules.storage import detail_updates
 from server_modules.storage import fallback_catalogs
 from server_modules.storage import legacy_volume_cleanup
 from server_modules.storage import metadata_store
@@ -108,12 +108,10 @@ from server_modules.normalization.title_utils import (
     normalize_display_title,
     parse_book_identity,
     qualify_numbered_subseries_badge,
-    series_identity_key,
-    virtual_series_url,
+    series_identity_key as parse_series_identity_key,
 )
 from server_modules.normalization.text_utils import (
     decode_string_list,
-    encode_string_list,
     normalize_legacy_title_case,
     normalize_synopsis,
     unique_nonempty_lines,
@@ -232,6 +230,10 @@ def parse_positive_int(value: str, default: int) -> int:
 
 def book_page_format(title: str, url: str) -> str | None:
     return parse_book_page_format(title, url)
+
+
+def series_identity_key(title: str, url: str) -> str:
+    return parse_series_identity_key(title, url)
 
 
 
@@ -591,152 +593,38 @@ def group_orphan_volume_families() -> int:
 
 
 def update_book_details(url: str, details: PostDetails) -> None:
-    inferred_parent: str | None = None
-    orphaned_parent: str | None = None
-    aggregate_parent: str | None = None
-    aggregate_catalog = (
-        details.entry_type == "series"
-        and not details.original_post_url
-        and is_aggregate_volume_catalog(url, details)
+    detail_updates.update_book_details(
+        url,
+        details,
+        detail_updates.DetailUpdateDeps(
+            connect_db=connect_db,
+            is_aggregate_volume_catalog=is_aggregate_volume_catalog,
+            is_established_series_book=is_established_series_book,
+            infer_aggregate_catalog_parent=infer_aggregate_catalog_parent,
+            infer_series_parent=infer_series_parent,
+            is_cached_book_url=is_cached_book_url,
+            invalidate_book_filter_counts=invalidate_book_filter_counts,
+            merge_orphaned_catalog=merge_orphaned_catalog,
+            reparent_series_alias=reparent_series_alias,
+            replace_series_volumes=replace_series_volumes,
+            apply_series_release_group_override=apply_series_release_group_override,
+            preserve_groups_for_partial_refresh=preserve_groups_for_partial_refresh,
+            build_fallback_catalog=build_fallback_catalog,
+            mark_series_metadata_checked=mark_series_metadata_checked,
+            reconcile_series_downloads=reconcile_series_downloads,
+            merge_cached_aggregate_catalogs_into_parent=merge_cached_aggregate_catalogs_into_parent,
+            merge_aggregate_catalog_into_parent=merge_aggregate_catalog_into_parent,
+            merge_explicit_alias_catalogs=merge_explicit_alias_catalogs,
+            merge_overlapping_catalog_aliases=merge_overlapping_catalog_aliases,
+            relabel_catalog_entries_from_books=relabel_catalog_entries_from_books,
+            reconcile_shared_index_subseries=reconcile_shared_index_subseries,
+            shared_index_subseries=SHARED_INDEX_SUBSERIES,
+        ),
     )
-    if (
-        details.entry_type == "series"
-        and not details.original_post_url
-        and (aggregate_catalog or not is_established_series_book(url))
-    ):
-        volume_label_hint = next(
-            (
-                volume.label
-                for volume in details.volumes
-                if re.match(r"^Volume\s+[0-9]", volume.label, re.IGNORECASE)
-            ),
-            None,
-        )
-        inferred_parent = (
-            infer_aggregate_catalog_parent(url, details)
-            if aggregate_catalog
-            else None
-        ) or infer_series_parent(
-            url,
-            [*details.parent_hints, *details.associated_names],
-            details.download_url,
-            volume_label_hint,
-        )
-        if inferred_parent:
-            if is_cached_book_url(inferred_parent):
-                if aggregate_catalog:
-                    aggregate_parent = inferred_parent
-                    inferred_parent = None
-                else:
-                    details.entry_type = "volume"
-                    details.original_post_url = inferred_parent
-                    details.volumes = []
-            else:
-                orphaned_parent = inferred_parent
-
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    associated_names = encode_string_list(details.associated_names)
-    genres = encode_string_list(details.genres)
-    with connect_db() as connection:
-        connection.execute(
-            """
-            UPDATE books
-            SET entry_type = ?,
-                original_post_url = ?,
-                download_url = ?,
-                detail_cached_at = ?,
-                detail_attempts = 0,
-                detail_last_attempt_at = ?,
-                detail_last_error = NULL,
-                associated_names = COALESCE(?, associated_names),
-                genres = COALESCE(?, genres),
-                synopsis = COALESCE(?, synopsis)
-            WHERE url = ?
-            """,
-            (
-                details.entry_type,
-                details.original_post_url,
-                details.download_url,
-                now,
-                now,
-                associated_names,
-                genres,
-                details.synopsis,
-                url,
-            ),
-        )
-        if details.entry_type == "series":
-            connection.execute(
-                """
-                UPDATE books
-                SET associated_names = COALESCE(?, associated_names),
-                    genres = COALESCE(?, genres),
-                    synopsis = COALESCE(?, synopsis)
-                WHERE original_post_url = ?
-                """,
-                (associated_names, genres, details.synopsis, url),
-            )
-    invalidate_book_filter_counts()
-    if orphaned_parent:
-        merge_orphaned_catalog(
-            orphaned_parent,
-            url,
-            details.volumes,
-        )
-    elif inferred_parent:
-        reparent_series_alias(url, inferred_parent)
-    elif details.entry_type == "series":
-        replace_series_volumes(
-            url,
-            apply_series_release_group_override(
-                url,
-                preserve_groups_for_partial_refresh(url, details.volumes),
-            ),
-        )
-        build_fallback_catalog(url)
-        mark_series_metadata_checked(url, now)
-        reconcile_series_downloads(url)
-        merge_cached_aggregate_catalogs_into_parent(url)
-        if aggregate_parent:
-            merge_aggregate_catalog_into_parent(aggregate_parent, url, details)
-    elif details.original_post_url:
-        build_fallback_catalog(details.original_post_url)
-    if inferred_parent and details.parent_hints:
-        merge_explicit_alias_catalogs(
-            inferred_parent,
-            details.parent_hints,
-            url,
-        )
-    if details.entry_type == "series" and not inferred_parent and not aggregate_parent:
-        merge_overlapping_catalog_aliases(url)
-    catalog_url = details.original_post_url or (
-        url if details.entry_type == "series" else None
-    )
-    if catalog_url:
-        relabel_catalog_entries_from_books(catalog_url)
-    for subseries_key, volumes in details.subseries_volumes.items():
-        subseries_url = virtual_series_url(subseries_key)
-        replace_series_volumes(subseries_url, volumes)
-        reconcile_series_downloads(subseries_url)
-        mark_series_metadata_checked(subseries_url, now)
-    identity_key = ""
-    with connect_db() as connection:
-        refreshed_book = connection.execute(
-            "SELECT title FROM books WHERE url = ?",
-            (url,),
-        ).fetchone()
-    if refreshed_book:
-        identity_key = series_identity_key(refreshed_book["title"], url)
-    if identity_key in SHARED_INDEX_SUBSERIES or url in SHARED_INDEX_SUBSERIES.values():
-        reconcile_shared_index_subseries()
 
 
 def validate_post_details(details: PostDetails) -> None:
-    can_recover_from_parent = (
-        details.entry_type == "volume" and details.original_post_url is not None
-    )
-    if not details.download_url and not details.volumes and not can_recover_from_parent:
-        raise ValueError("No download link found on the post.")
+    detail_updates.validate_post_details(details)
 
 
 def replace_series_volumes(series_url: str, volumes: list[SeriesVolume]) -> None:
