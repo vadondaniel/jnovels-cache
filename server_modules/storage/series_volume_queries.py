@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-import urllib.parse
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from contextlib import AbstractContextManager
 from typing import Any
 
@@ -11,6 +10,7 @@ from server_modules.normalization.label_utils import catalog_display_label, extr
 from server_modules.normalization.release_groups import format_release_family
 from server_modules.normalization.title_utils import parse_book_identity, series_identity_key
 from server_modules.normalization.url_utils import canonical_page_url, is_internal_jnovels_url
+from server_modules.storage.series_volume_book_rows import collect_related_book_rows
 
 
 ConnectDb = Callable[[], AbstractContextManager[sqlite3.Connection]]
@@ -23,29 +23,6 @@ def list_series_volumes(
     infer_aggregate_catalog_parent_from_db: Callable[[str, str], str | None],
     filter_pdf_rows_when_epub_exists: Callable[[list[Any]], list[Any]],
 ) -> list[dict[str, Any]]:
-    def add_book_rows(
-        collected: dict[str, sqlite3.Row],
-        connection: sqlite3.Connection,
-        sql: str,
-        params: tuple[Any, ...],
-    ) -> None:
-        for row in connection.execute(sql, params).fetchall():
-            collected.setdefault(row["url"], row)
-
-    def url_lookup_variants(url: str) -> set[str]:
-        canonical = canonical_page_url(url)
-        variants = {url, canonical}
-        parsed = urllib.parse.urlsplit(canonical)
-        if parsed.path != "/" and not parsed.path.endswith("/"):
-            variants.add(
-                urllib.parse.urlunsplit(parsed._replace(path=f"{parsed.path}/"))
-            )
-        return variants
-
-    def chunks(values: list[str], size: int = 400) -> Iterator[list[str]]:
-        for index in range(0, len(values), size):
-            yield values[index : index + size]
-
     with connect_db() as connection:
         rows = [
             dict(row)
@@ -68,78 +45,11 @@ def list_series_volumes(
             """,
             (series_url,),
         ).fetchone()
-        book_rows_by_url: dict[str, sqlite3.Row] = {}
-        add_book_rows(
-            book_rows_by_url,
+        book_rows_by_url = collect_related_book_rows(
             connection,
-            """
-            SELECT title, url, download_url, published_at, entry_type,
-                   original_post_url
-            FROM books
-            WHERE original_post_url = ?
-            """,
-            (series_url,),
+            series_url=series_url,
+            catalog_rows=rows,
         )
-        download_urls = sorted(
-            {row["download_url"] for row in rows if row["download_url"]}
-        )
-        for batch in chunks(download_urls):
-            placeholders = ", ".join("?" for _ in batch)
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE download_url IN ({placeholders})
-                """,
-                tuple(batch),
-            )
-        internal_url_variants = sorted(
-            {
-                variant
-                for download_url in download_urls
-                if is_internal_jnovels_url(download_url)
-                for variant in url_lookup_variants(download_url)
-            }
-        )
-        for batch in chunks(internal_url_variants):
-            placeholders = ", ".join("?" for _ in batch)
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE url IN ({placeholders})
-                """,
-                tuple(batch),
-            )
-        labels = sorted({row["label"] for row in rows if row["label"]})
-        for batch in chunks(labels, 80):
-            label_conditions = " OR ".join(
-                "title LIKE ? ESCAPE '\\'" for _ in batch
-            )
-            label_params = tuple(
-                "%"
-                + label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                + "%"
-                for label in batch
-            )
-            add_book_rows(
-                book_rows_by_url,
-                connection,
-                f"""
-                SELECT title, url, download_url, published_at, entry_type,
-                       original_post_url
-                FROM books
-                WHERE entry_type = 'volume'
-                  AND ({label_conditions})
-                """,
-                label_params,
-            )
 
     target_key = series_identity_key(
         series_book["title"] if series_book else None,
