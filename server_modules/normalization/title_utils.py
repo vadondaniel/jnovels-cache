@@ -4,6 +4,7 @@ import re
 import urllib.parse
 
 from server_modules.normalization.label_utils import compact_volume_badge, normalize_volume_number
+from server_modules.normalization import subseries_titles
 from server_modules.normalization.text_utils import normalize_legacy_title_case
 
 
@@ -208,79 +209,34 @@ def book_duplicate_key(title: str, url: str) -> tuple[str, str]:
 
 
 def series_keys_are_related(first: str, second: str) -> bool:
-    if not first or not second:
-        return False
-    if first == second:
-        return True
-    shorter, longer = sorted((first, second), key=len)
-    return len(shorter.split()) >= 2 and longer.startswith(f"{shorter} ")
+    return subseries_titles.series_keys_are_related(first, second)
 
 
 def is_numbered_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    parent_key = " ".join(re.findall(r"[a-z0-9]+", parent_title.casefold()))
-    candidate_key = " ".join(re.findall(r"[a-z0-9]+", candidate_title.casefold()))
-    if not parent_key or not candidate_key.startswith(f"{parent_key} "):
-        return False
-    suffix = candidate_key[len(parent_key) :].strip()
-    return bool(
-        re.fullmatch(
-            r"(?:year|part|season|arc)\s+[0-9]+(?:\s+(?:part|arc)\s+[0-9]+)?",
-            suffix,
-        )
-    )
+    return subseries_titles.is_numbered_subseries_title(parent_title, candidate_title)
 
 
 def is_named_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    parent_key = series_identity_key(parent_title, "")
-    candidate_key = series_identity_key(candidate_title, "")
-    if not parent_key or not candidate_key.startswith(f"{parent_key} "):
-        return False
-    suffix = candidate_key[len(parent_key) :].strip()
-    return bool(
-        re.match(
-            r"(?:progressive|alternative\b|short stor(?:y|ies)\b|side stor(?:y|ies)\b|"
-            r"zero\b|ex\b|gaiden\b)",
-            suffix,
-        )
+    return subseries_titles.is_named_subseries_title(
+        parent_title,
+        candidate_title,
+        series_identity_key=series_identity_key,
     )
 
 
 def is_distinct_subseries_title(parent_title: str, candidate_title: str) -> bool:
-    return is_numbered_subseries_title(
+    return subseries_titles.is_distinct_subseries_title(
         parent_title,
         candidate_title,
-    ) or is_named_subseries_title(parent_title, candidate_title)
+        series_identity_key=series_identity_key,
+    )
 
 
 def qualify_numbered_subseries_badge(
     title: str,
     volume_label: str | None,
 ) -> str | None:
-    if not volume_label:
-        return None
-    match = re.search(
-        r"\b(year|part|season|arc)\s+([0-9]+)\b"
-        r".*?\b(?:volume|vol\.?)\s*[0-9]",
-        title,
-        re.IGNORECASE,
-    )
-    if not match:
-        return volume_label
-    prefixes = {
-        "year": "Yr.",
-        "part": "Pt.",
-        "season": "S.",
-        "arc": "Arc",
-    }
-    prefix = prefixes[match.group(1).casefold()]
-    catalog_volume = re.search(
-        r"\b(?:volume|vol\.?)\s*([0-9]+(?:\.[0-9]+)?)",
-        volume_label,
-        re.IGNORECASE,
-    )
-    if catalog_volume:
-        volume_label = f"Vol. {normalize_volume_number(catalog_volume.group(1))}"
-    return f"{prefix} {match.group(2)} · {volume_label}"
+    return subseries_titles.qualify_numbered_subseries_badge(title, volume_label)
 
 
 def parent_hint_aliases(hints: list[str], url: str) -> list[tuple[str, str]]:
