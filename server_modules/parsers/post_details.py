@@ -15,6 +15,7 @@ from server_modules.normalization.label_utils import (
     looks_like_download_text,
 )
 from server_modules.domain.models import PostDetails, SeriesVolume
+from server_modules.parsers.post_details_finalizer import build_post_details
 from server_modules.normalization.release_groups import (
     catalog_section_from_heading,
     default_catalog_section_from_url,
@@ -23,7 +24,6 @@ from server_modules.normalization.release_groups import (
     release_group_from_catalog_text,
     release_group_from_heading,
 )
-from server_modules.normalization.text_utils import normalize_synopsis, unique_nonempty_lines
 from server_modules.normalization.url_utils import (
     canonical_page_url,
     is_external_http_url,
@@ -414,74 +414,13 @@ class PostDetailsParser(HTMLParser):
         )
 
     def details(self) -> PostDetails:
-        entry_type = "volume" if self.original_post_url else "series"
-        associated_names = unique_nonempty_lines("".join(self._associated_parts))
-        synopsis = normalize_synopsis("".join(self._description_parts))
-        volumes = self.volumes
-        source_lists = sorted({volume.source_list for volume in volumes if volume.source_list})
-        subseries_volumes: dict[str, list[SeriesVolume]] = {}
-        if canonical_page_url(self.post_url) == canonical_page_url(SAO_INDEX_URL):
-            for source_list, identity_key in {
-                2: "sword art online progressive",
-                3: "sword art online alternative gun gale online",
-            }.items():
-                catalog = [
-                    volume for volume in volumes if volume.source_list == source_list
-                ]
-                if catalog:
-                    subseries_volumes[identity_key] = [
-                        SeriesVolume(
-                            volume.label,
-                            volume.download_url,
-                            position,
-                            volume.release_group,
-                            volume.source_list,
-                        )
-                        for position, volume in enumerate(catalog)
-                    ]
-        if len(source_lists) > 1:
-            primary_list = source_lists[0]
-            volumes = [
-                volume
-                for volume in volumes
-                if volume.source_list in {0, primary_list}
-                or volume.release_group is not None
-            ]
-        if any(
-            re.match(r"^(?:Volume|Part)\s+[0-9]", volume.label, re.IGNORECASE)
-            for volume in volumes
-        ):
-            volumes = [
-                volume
-                for volume in volumes
-                if not (
-                    volume.label.casefold() == "complete edition"
-                    and is_legacy_forum_landing_url(volume.download_url)
-                )
-            ]
-        download_url = self.download_url
-        if download_url and all(
-            volume.download_url != download_url for volume in volumes
-        ):
-            download_url = volumes[0].download_url if volumes else None
-        epub_download = next(
-            (
-                volume.download_url
-                for volume in volumes
-                if (volume.release_group or "").casefold().endswith("epub")
-            ),
-            None,
-        )
-        if epub_download:
-            download_url = epub_download
-        return PostDetails(
-            entry_type,
-            self.original_post_url,
-            download_url,
-            volumes if entry_type == "series" else [],
-            associated_names,
-            self._genres,
-            synopsis,
-            self._parent_hints,
-            subseries_volumes,
+        return build_post_details(
+            post_url=self.post_url,
+            original_post_url=self.original_post_url,
+            download_url=self.download_url,
+            volumes=self.volumes,
+            associated_parts=self._associated_parts,
+            genres=self._genres,
+            description_parts=self._description_parts,
+            parent_hints=self._parent_hints,
         )
