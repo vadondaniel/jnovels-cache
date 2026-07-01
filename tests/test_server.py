@@ -3951,6 +3951,24 @@ class DatabaseTests(unittest.TestCase):
             [("Volume 1", "https://enagato.com/fan-volume-1")],
         )
 
+    def test_ignores_internal_app_promo_links_in_related_catalog(self):
+        parser = server.PostDetailsParser("https://jnovels.com/example/")
+        parser.feed(
+            """
+            <div class="post-content">
+              <p><a href="https://jnovels.com/zerobooks-ios">iOS</a></p>
+              <p><a href="https://jnovels.com/example-manga/">Example Manga</a></p>
+            </div>
+            """
+        )
+
+        details = parser.details()
+
+        self.assertEqual(
+            [(volume.label, volume.download_url) for volume in details.volumes],
+            [("Example Manga", "https://jnovels.com/example-manga/")],
+        )
+
     def test_parent_refresh_merges_cached_child_missing_from_source_catalog(self):
         series_url = "https://jnovels.com/example-all-volumes-epub/"
         child_url = "https://jnovels.com/example-volume-3-epub/"

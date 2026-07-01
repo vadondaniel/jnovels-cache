@@ -42,6 +42,8 @@ def is_internal_related_catalog_url(value: str, current_url: str) -> bool:
     if canonical_page_url(value) == canonical_page_url(current_url):
         return False
     path = parsed.path.casefold()
+    if path.rstrip("/") in {"/zerobooks-ios"}:
+        return False
     return (
         path not in {"", "/", "/faq/"}
         and not path.startswith("/category/")
