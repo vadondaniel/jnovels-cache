@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import re
 import threading
 from collections.abc import Callable
 from contextlib import AbstractContextManager
@@ -8,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from server_modules.normalization.release_groups import release_group_format_kind
-from server_modules.normalization.title_utils import series_identity_key
+from server_modules.normalization.title_utils import (
+    normalize_display_title,
+    parse_book_identity,
+    series_identity_key,
+)
 from server_modules.normalization.url_utils import is_counted_catalog_volume, is_internal_jnovels_url
 
 
@@ -25,6 +30,7 @@ _catalog_index_cache: tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ] | None = None
 
 
@@ -85,6 +91,7 @@ def get_catalog_indexes() -> tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ]:
     global _catalog_index_cache
     if DB_PATH is None:
@@ -93,7 +100,7 @@ def get_catalog_indexes() -> tuple[
         if (
             _catalog_index_cache is not None
             and _catalog_index_cache[0] == DB_PATH
-            and len(_catalog_index_cache) == 6
+            and len(_catalog_index_cache) == 7
         ):
             return _catalog_index_cache[1:]
 
@@ -116,6 +123,13 @@ def get_catalog_indexes() -> tuple[
                 ) AS counts ON counts.series_url = sv.series_url
                 LEFT JOIN books AS b ON b.url = sv.series_url
                 ORDER BY counts.volume_count DESC, sv.series_url, sv.position
+                """
+            ).fetchall()
+            volume_books = connection.execute(
+                """
+                SELECT title, url, original_post_url
+                FROM books
+                WHERE entry_type = 'volume'
                 """
             ).fetchall()
 
@@ -183,6 +197,24 @@ def get_catalog_indexes() -> tuple[
             }.items()
         }
 
+        duplicate_volume_numbers: dict[tuple[str, str], set[str]] = {}
+        for book in volume_books:
+            parent_url = book["original_post_url"]
+            if not parent_url:
+                continue
+            _, badge = parse_book_identity(book["title"], book["url"])
+            match = re.fullmatch(r"Vol\. ([0-9]+(?:\.[0-9]+)?)", badge or "")
+            if not match:
+                continue
+            identity = (parent_url, match.group(1))
+            title_identity = normalize_display_title(book["title"])
+            title_identity = title_identity.removesuffix(" PDF").casefold()
+            duplicate_volume_numbers.setdefault(identity, set()).add(title_identity)
+        duplicate_volume_counts = {
+            identity: len(titles)
+            for identity, titles in duplicate_volume_numbers.items()
+        }
+
         _catalog_index_cache = (
             DB_PATH,
             catalog_index,
@@ -190,6 +222,7 @@ def get_catalog_indexes() -> tuple[
             volume_counts,
             download_category_counts,
             primary_category_counts,
+            duplicate_volume_counts,
         )
         return (
             catalog_index,
@@ -197,14 +230,15 @@ def get_catalog_indexes() -> tuple[
             volume_counts,
             download_category_counts,
             primary_category_counts,
+            duplicate_volume_counts,
         )
 
 
 def get_series_catalog_index() -> dict[str, tuple[str, int]]:
-    catalog_index, _, _, _, _ = get_catalog_indexes()
+    catalog_index, *_ = get_catalog_indexes()
     return catalog_index
 
 
 def get_download_catalog_index() -> dict[str, tuple[str, int]]:
-    _, download_index, _, _, _ = get_catalog_indexes()
+    _, download_index, *_ = get_catalog_indexes()
     return download_index

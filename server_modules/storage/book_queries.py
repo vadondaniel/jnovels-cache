@@ -25,6 +25,7 @@ _get_catalog_indexes: Callable[[], tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ]] | None = None
 _infer_aggregate_catalog_parents_from_db: Callable[[list[tuple[str, str]]], dict[str, str]] | None = None
 _infer_aggregate_catalog_parent_from_db: Callable[[str, str], str | None] | None = None
@@ -42,6 +43,7 @@ def configure(
         dict[str, int],
         dict[str, int],
         dict[str, int],
+        dict[tuple[str, str], int],
     ]],
     infer_aggregate_catalog_parents_from_db: Callable[[list[tuple[str, str]]], dict[str, str]],
     infer_aggregate_catalog_parent_from_db: Callable[[str, str], str | None],
@@ -81,6 +83,7 @@ def get_catalog_indexes() -> tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ]:
     if _get_catalog_indexes is None:
         raise RuntimeError("book query dependencies are not configured")

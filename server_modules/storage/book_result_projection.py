@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -21,6 +22,7 @@ CatalogIndexes = tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ]
 
 
@@ -40,6 +42,7 @@ def project_listed_books(
         volume_counts,
         download_category_counts,
         primary_category_counts,
+        duplicate_volume_counts,
     ) = get_catalog_indexes()
     aggregate_parent_urls = infer_aggregate_catalog_parents_from_db(
         [
@@ -85,6 +88,29 @@ def project_listed_books(
         aggregate_parent_url = aggregate_parent_urls.get(book["url"])
         if aggregate_parent_url:
             series_url = aggregate_parent_url
+        if (
+            book["entry_type"] == "volume"
+            and series_title.casefold() == "agents of the four seasons"
+            and volume_label
+        ):
+            number_match = re.fullmatch(r"Vol\. ([0-9]+(?:\.[0-9]+)?)", volume_label)
+            duplicate_key = (
+                series_url or book["original_post_url"] or "",
+                number_match.group(1) if number_match else "",
+            )
+            if (
+                number_match
+                and duplicate_volume_counts.get(duplicate_key, 0) > 1
+            ):
+                _, volume_label = parse_book_identity(
+                    book["title"],
+                    book["url"],
+                    duplicate_volume_number=True,
+                )
+                volume_label = prefer_catalog_volume_badge(
+                    volume_label,
+                    book["catalog_volume_label"],
+                )
         catalog = catalog_index.get(series_identity_key(book["title"], book["url"]))
         download_catalog = download_catalog_index.get(book["download_url"] or "")
         book_key = series_identity_key(book["title"], book["url"])

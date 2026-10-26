@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from email.message import Message
 from pathlib import Path
+from urllib import request
 from unittest.mock import call, patch
 
 import server
@@ -355,6 +356,15 @@ class ParserTests(unittest.TestCase):
                     "https://jnovels.com/example-volume-1-epub/",
                 )
                 self.assertEqual(badge, expected_badge)
+
+        self.assertEqual(
+            server.parse_book_identity(
+                "Agents of the Four Seasons Volume 8: Future Arc, Part I Epub",
+                "https://jnovels.com/agents-of-the-four-seasons-volume-8-part-i-epub/",
+                duplicate_volume_number=True,
+            )[1],
+            "Vol. 8.1",
+        )
 
     def test_does_not_treat_subtitle_part_numbers_as_volume_subdivisions(self):
         cases = [
@@ -5099,7 +5109,7 @@ class SyncTests(unittest.TestCase):
             Message(),
             None,
         )
-        with patch.object(server.urllib.request, "urlopen", side_effect=error):
+        with patch.object(request, "urlopen", side_effect=error):
             self.assertEqual(server.fetch_page(907), [])
 
     def test_search_page_404_on_first_page_is_still_an_error(self):
@@ -5111,7 +5121,7 @@ class SyncTests(unittest.TestCase):
             None,
         )
         with (
-            patch.object(server.urllib.request, "urlopen", side_effect=error),
+            patch.object(request, "urlopen", side_effect=error),
             self.assertRaises(server.urllib.error.HTTPError),
         ):
             server.fetch_page(1)

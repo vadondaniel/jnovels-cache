@@ -215,6 +215,7 @@ _catalog_index_cache: tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ] | None = None
 _books_fts_lock = threading.Lock()
 _books_fts_available: tuple[Path, bool] | None = None
@@ -338,6 +339,7 @@ def get_catalog_indexes() -> tuple[
     dict[str, int],
     dict[str, int],
     dict[str, int],
+    dict[tuple[str, str], int],
 ]:
     _configure_catalog_cache()
     return catalog_cache.get_catalog_indexes()

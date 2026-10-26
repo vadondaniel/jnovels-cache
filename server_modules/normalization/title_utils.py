@@ -42,7 +42,12 @@ def normalize_display_title(value: str) -> str:
     return cleaned
 
 
-def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
+def parse_book_identity(
+    title: str,
+    url: str,
+    *,
+    duplicate_volume_number: bool = False,
+) -> tuple[str, str | None]:
     cleaned = normalize_display_title(title)
     cleaned = re.sub(r"\s+Epub$", "", cleaned, flags=re.IGNORECASE).strip()
     cleaned = re.sub(
@@ -68,7 +73,11 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
             series_title = f"{series_title} PDF"
         # This series numbers its installments independently; subtitle parts
         # must not be folded into the volume number, including future entries.
-        if series_title.removesuffix(" PDF").casefold() == "agents of the four seasons":
+        if (
+            series_title.removesuffix(" PDF").casefold()
+            == "agents of the four seasons"
+            and not duplicate_volume_number
+        ):
             return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
         return series_title, compact_volume_badge(match.group(1), suffix)
 
