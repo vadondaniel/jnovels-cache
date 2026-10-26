@@ -326,7 +326,19 @@ class ParserTests(unittest.TestCase):
             ("Example Vol. 11 Canto I Epub", "Vol. 11.1"),
             (
                 "Agents of the Four Seasons Volume 6: Dance of Autumn, Part I Epub",
-                "Vol. 6.1",
+                "Vol. 6",
+            ),
+            (
+                "Agents of the Four Seasons Volume 7: Dance of Autumn, Part II Epub",
+                "Vol. 7",
+            ),
+            (
+                "Agents of the Four Seasons Volume 4: Dance of Summer, Part II Epub",
+                "Vol. 4",
+            ),
+            (
+                "Agents of the Four Seasons Volume 8: Future Arc, Part IV Epub",
+                "Vol. 8",
             ),
             ("Example Volume 4 II Epub", "Vol. 4.2"),
             ("No Game No Life Volume 11 Chapter 1 Epub", "Vol. 11 Ch. 1"),

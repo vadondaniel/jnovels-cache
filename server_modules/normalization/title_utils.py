@@ -66,6 +66,10 @@ def parse_book_identity(title: str, url: str) -> tuple[str, str | None]:
         series_title = cleaned[: match.start()].rstrip(" ,:;.-–—…")
         if has_pdf_suffix:
             series_title = f"{series_title} PDF"
+        # This series numbers its installments independently; subtitle parts
+        # must not be folded into the volume number, including future entries.
+        if series_title.removesuffix(" PDF").casefold() == "agents of the four seasons":
+            return series_title, f"Vol. {normalize_volume_number(match.group(1))}"
         return series_title, compact_volume_badge(match.group(1), suffix)
 
     legacy_number = re.search(
