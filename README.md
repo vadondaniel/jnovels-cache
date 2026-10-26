@@ -3,6 +3,10 @@
 A local web app for browsing cached JNovels EPUB posts and series catalogs.
 It stores metadata and links, not EPUB files.
 
+## Screenshot
+
+![JNovels Cache app showing cached entries](assets/jnovels-cache.png)
+
 ## Requirements
 
 - Python 3.10 or newer
