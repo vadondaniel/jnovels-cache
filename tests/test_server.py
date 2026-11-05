@@ -5091,6 +5091,9 @@ class DatabaseTests(unittest.TestCase):
 
 class SyncTests(unittest.TestCase):
     def setUp(self):
+        source_patch = patch.object(server, "check_source_changes")
+        source_patch.start()
+        self.addCleanup(source_patch.stop)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "cache.db"
         self.db_patch = patch.object(server, "DB_PATH", self.db_path)

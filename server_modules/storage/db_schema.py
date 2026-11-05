@@ -159,6 +159,12 @@ def initialize_schema(connection: sqlite3.Connection) -> bool:
         connection.execute("ALTER TABLE series_status ADD COLUMN metadata_checked_at TEXT")
     if "unavailable_at" not in status_columns:
         connection.execute("ALTER TABLE series_status ADD COLUMN unavailable_at TEXT")
+    if "source_modified_at" not in status_columns:
+        connection.execute("ALTER TABLE series_status ADD COLUMN source_modified_at TEXT")
+    if "source_change_pending" not in status_columns:
+        connection.execute(
+            "ALTER TABLE series_status ADD COLUMN source_change_pending INTEGER NOT NULL DEFAULT 0"
+        )
     connection.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_books_original_post_cached

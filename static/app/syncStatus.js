@@ -28,7 +28,7 @@ export function updateStatus(payload) {
   elements.cacheHealth.hidden =
     sync.running || (!health.pending_details && !health.refreshable_series);
   elements.repairAll.hidden = !health.pending_details;
-  elements.refreshSeries.hidden = !health.refreshable_series;
+  elements.refreshSeries.hidden = !state.cacheCount;
   const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
   const healthParts = [];
   if (health.pending_details) healthParts.push(`${health.pending_details} pending${failedText}`);
@@ -48,7 +48,11 @@ export function updateStatus(payload) {
     const detailLines = [];
     const queuedDetails = sync.queued_details || 0;
     const queuedSeries = sync.queued_series || 0;
-    if (sync.phase === "index") {
+    if (sync.phase === "source") {
+      elements.syncStatusLabel.textContent = `Checking source changes · ${sync.source_service || "metadata"}`;
+      detailLines.push(`${sync.source_requests_completed || 0} requests completed`);
+      detailLines.push(`${sync.source_entries_checked || 0} source entries checked`);
+    } else if (sync.phase === "index") {
       elements.syncStatusLabel.textContent = "Checking series index";
     } else if (sync.phase === "series") {
       elements.syncStatusLabel.textContent =
@@ -77,18 +81,30 @@ export function updateStatus(payload) {
     }
     const eta = estimateSyncTime(sync);
     if (eta) detailLines.push(eta);
+    if (sync.source_series_checked) detailLines.push(`${sync.source_series_checked} series metadata checks completed`);
+    detailLines.push(...(sync.source_warnings || []));
     elements.syncStatusDetail.textContent = detailLines.join("\n");
     elements.syncStatus.tabIndex = 0;
     elements.syncStatus.classList.add("is-running");
   } else {
     elements.syncStatus.classList.remove("is-running");
-    elements.syncStatus.hidden = !sync.error;
+    const warnings = sync.source_warnings || [];
+    const checked = sync.source_entries_checked || 0;
+    elements.syncStatus.hidden = !sync.error && !warnings.length && !checked && !sync.series_total;
     elements.syncStatusLabel.textContent = sync.error
       ? `Last sync failed: ${sync.error}`
-      : "";
-    elements.syncStatusDetail.textContent = "";
-    elements.syncStatus.removeAttribute("tabindex");
+      : warnings.length
+        ? "Refresh finished with source-check warnings"
+        : checked ? "Source check and refresh finished" : "Series refresh finished";
+    elements.syncStatusDetail.textContent = [
+      ...(checked ? [`${checked} source entries checked · ${sync.source_series_checked || 0} series metadata checks`] : []),
+      `${sync.series_completed || 0} series pages processed · ${sync.series_errors || 0} failed`,
+      ...warnings,
+    ].join("\n");
+    if (elements.syncStatus.hidden) elements.syncStatus.removeAttribute("tabindex");
+    else elements.syncStatus.tabIndex = 0;
   }
+  elements.syncStatus.classList.toggle("has-details", !elements.syncStatus.hidden);
 }
 
 export function updateSyncModes(preferredMode = null) {
@@ -109,9 +125,7 @@ export function updateSyncModes(preferredMode = null) {
         ["extend", "Add older entries"],
         ...seriesIndexModes,
         ...(pending ? [["repair", `Repair incomplete entries (${pending})`]] : []),
-        ...(refreshableSeries
-          ? [["series_refresh", `Refresh series data (${refreshableSeries})`]]
-          : []),
+        ["series_refresh", refreshableSeries ? `Refresh series data (${refreshableSeries})` : "Check series changes"],
         ["manual", "Scan specific pages"],
       ]
     : [
@@ -135,6 +149,8 @@ export function updateSyncModes(preferredMode = null) {
 
 export function updateSyncMode() {
   const mode = elements.syncMode.value;
+  elements.forceRefreshField.hidden = mode !== "series_refresh";
+  if (mode !== "series_refresh") elements.forceFullRefresh.checked = false;
   elements.startPageField.hidden = mode !== "manual";
   if (mode === "catchup") {
     elements.maxPagesLabel.textContent = "Page limit";
@@ -161,7 +177,7 @@ export function updateSyncMode() {
     elements.maxPages.value = "250";
     elements.maxPages.max = "2000";
     elements.syncHelp.textContent =
-      "Updates stale catalogs and fills missing genres, associated names, and synopses.";
+      "Checks source modification dates, then refreshes changed series and missing info. Unchanged series receive a full refresh every 180 days. The series limit applies to full page fetches.";
   } else if (mode === "series_discovery") {
     elements.maxPagesLabel.textContent = "Series limit";
     elements.maxPages.value = state.cacheCount ? "50" : "20";

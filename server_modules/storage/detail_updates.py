@@ -189,6 +189,13 @@ def update_book_details(url: str, details: PostDetails, deps: DetailUpdateDeps) 
         identity_key = series_identity_key(refreshed_book["title"], url)
     if identity_key in deps.shared_index_subseries or url in deps.shared_index_subseries.values():
         deps.reconcile_shared_index_subseries()
+    if details.entry_type == "series" and not inferred_parent:
+        with deps.connect_db() as connection:
+            connection.execute(
+                "UPDATE series_status SET checked_at = ?, "
+                "source_change_pending = CASE WHEN source_modified_at > ? THEN 1 ELSE 0 END "
+                "WHERE series_url = ?", (now, now, url),
+            )
 
 
 def validate_post_details(details: PostDetails) -> None:

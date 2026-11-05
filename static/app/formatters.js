@@ -16,6 +16,7 @@ export function formatRemainingTime(seconds) {
 }
 
 export function estimateSyncTime(sync) {
+  if (sync.phase === "source") return "";
   const phaseStarted = Date.parse(sync.phase_started_at || "");
   const elapsed = Number.isFinite(phaseStarted)
     ? Math.max((Date.now() - phaseStarted) / 1000, 0)

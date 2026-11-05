@@ -44,8 +44,8 @@
   white-space: pre-line;
 }
 
-.sync-status.is-running:hover .sync-status__detail,
-.sync-status.is-running:focus .sync-status__detail {
+.sync-status.has-details:hover .sync-status__detail,
+.sync-status.has-details:focus .sync-status__detail {
   opacity: 1;
   transform: translateY(0);
 }

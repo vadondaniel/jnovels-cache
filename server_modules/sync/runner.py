@@ -47,6 +47,8 @@ class SyncRunnerDeps:
     update_book_details: Callable[[str, PostDetails], None]
     record_detail_failure: Callable[[str, Exception], None]
     sleep: Callable[[float], None]
+    check_source_changes: Callable[[float, bool], None]
+    get_forced_series_urls: Callable[[int], list[str]]
 
 
 def utc_timestamp() -> str:
@@ -64,6 +66,7 @@ def run_sync_worker(
     *,
     config: SyncRunnerConfig,
     deps: SyncRunnerDeps,
+    force_full_refresh: bool = False,
 ) -> None:
     sync_state = deps.sync_state
     initial_cache_signature: str | None = None
@@ -88,12 +91,21 @@ def run_sync_worker(
         }
         deps.save_sync_checkpoint(checkpoint)
 
+        if not recovery and series_urls_override is None and mode not in {"repair", "series_discovery"}:
+            deps.check_source_changes(delay, mode == "series_refresh")
+        sync_state["phase"] = "details" if detail_urls_override is not None else "search"
+        sync_state["phase_started_at"] = utc_timestamp()
+
         scheduled_series_urls: set[str] = set(series_urls_override or [])
+        selected_order = list(series_urls_override or [])
         if detail_urls_override is not None:
             detail_urls = list(dict.fromkeys(detail_urls_override))
         elif mode == "series_refresh":
             detail_urls = []
-            scheduled_series_urls.update(deps.get_series_refresh_urls(max_pages))
+            if series_urls_override is None:
+                selected_order = (deps.get_forced_series_urls(max_pages) if force_full_refresh
+                                  else deps.get_series_refresh_urls(max_pages))
+                scheduled_series_urls.update(selected_order)
         elif mode == "repair":
             detail_urls = deps.get_incomplete_detail_urls(max_pages)
         elif mode == "series_discovery":
@@ -161,9 +173,8 @@ def run_sync_worker(
                     exclude_urls=set(detail_urls),
                 )
             )
-            scheduled_series_urls.update(
-                deps.get_series_refresh_urls(config.auto_series_refresh_limit)
-            )
+            selected_order = deps.get_series_refresh_urls(config.auto_series_refresh_limit)
+            scheduled_series_urls.update(selected_order)
             if deps.series_index_is_initialized():
                 if deps.series_index_refresh_due():
                     try:
@@ -187,7 +198,7 @@ def run_sync_worker(
         sync_state["queued_series"] = len(scheduled_series_urls)
         checkpoint["phase"] = "details"
         checkpoint["pending_detail_urls"] = list(dict.fromkeys(detail_urls))
-        checkpoint["pending_series_urls"] = sorted(scheduled_series_urls)
+        checkpoint["pending_series_urls"] = selected_order
         deps.save_sync_checkpoint(checkpoint)
         discovered_series_urls: set[str] = set()
         detail_url_set = set(detail_urls)
@@ -222,14 +233,13 @@ def run_sync_worker(
                         - detail_url_set
                     )
                     checkpoint["pending_detail_urls"] = detail_urls[index + 1 :]
-                    checkpoint["pending_series_urls"] = sorted(
-                        scheduled_series_urls | discovered_series_urls
-                    )
+                    checkpoint["pending_series_urls"] = selected_order + sorted(discovered_series_urls - scheduled_series_urls)
                     deps.save_sync_checkpoint(checkpoint)
 
-        missing_series_urls = sorted(
-            (discovered_series_urls | scheduled_series_urls) - detail_url_set
-        )
+        # Keep oldest-first selection order, including across checkpoint recovery.
+        missing = (discovered_series_urls | scheduled_series_urls) - detail_url_set
+        missing_series_urls = [url for url in selected_order if url in missing]
+        missing_series_urls.extend(sorted(missing - set(missing_series_urls)))
         sync_state["phase"] = "series"
         sync_state["phase_started_at"] = utc_timestamp()
         sync_state["series_total"] = len(missing_series_urls)

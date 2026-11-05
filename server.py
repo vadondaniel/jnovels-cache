@@ -27,6 +27,7 @@ from server_modules.storage import series_parent_inference
 from server_modules.storage import series_index_store
 from server_modules.storage import series_catalog_repository
 from server_modules.sync.collection import collect_sync_books as collect_sync_books_impl
+from server_modules.sync.source_changes import check_source_changes as check_source_changes_impl
 from server_modules.sync.runner import (
     SyncRunnerConfig,
     SyncRunnerDeps,
@@ -880,6 +881,14 @@ def get_series_refresh_urls(limit: int) -> list[str]:
     return cache_state.get_series_refresh_urls(connect_db, SERIES_STALE_DAYS, limit)
 
 
+def get_forced_series_urls(limit: int) -> list[str]:
+    return cache_state.get_series_refresh_urls(connect_db, SERIES_STALE_DAYS, limit, force=True)
+
+
+def check_source_changes(delay: float, force: bool) -> None:
+    check_source_changes_impl(connect_db, sync_state, delay, time.sleep, force=force)
+
+
 def list_repair_failures(limit: int = 100) -> list[dict[str, Any]]:
     return cache_state.list_repair_failures(connect_db, limit)
 
@@ -936,6 +945,11 @@ sync_state: dict[str, Any] = {
     "series_completed": 0,
     "series_total": 0,
     "series_errors": 0,
+    "source_entries_checked": 0,
+    "source_series_checked": 0,
+    "source_requests_completed": 0,
+    "source_service": None,
+    "source_warnings": [],
     "queued_details": 0,
     "queued_series": 0,
     "request_delay": None,
@@ -972,6 +986,11 @@ def set_sync_started(
             "series_completed": 0,
             "series_total": 0,
             "series_errors": 0,
+            "source_entries_checked": 0,
+            "source_series_checked": 0,
+            "source_requests_completed": 0,
+            "source_service": None,
+            "source_warnings": [],
             "queued_details": 0,
             "queued_series": 0,
             "request_delay": delay,
@@ -994,6 +1013,7 @@ def start_sync_thread(
     recovery: bool = False,
     *,
     name: str = "jnovels-sync",
+    force_full_refresh: bool = False,
 ) -> bool:
     if not sync_lock.acquire(blocking=False):
         return False
@@ -1012,6 +1032,7 @@ def start_sync_thread(
             True,
         ),
         name=name,
+        kwargs={"force_full_refresh": force_full_refresh},
         daemon=True,
     )
     try:
@@ -1075,6 +1096,8 @@ def run_sync(
     series_urls_override: list[str] | None = None,
     recovery: bool = False,
     lock_acquired: bool = False,
+    *,
+    force_full_refresh: bool = False,
 ) -> None:
     if not lock_acquired and not sync_lock.acquire(blocking=False):
         return
@@ -1122,7 +1145,10 @@ def run_sync(
                 update_book_details=update_book_details,
                 record_detail_failure=record_detail_failure,
                 sleep=time.sleep,
+                check_source_changes=check_source_changes,
+                get_forced_series_urls=get_forced_series_urls,
             ),
+            force_full_refresh=force_full_refresh,
         )
     finally:
         sync_state["running"] = False

@@ -102,3 +102,12 @@
   color: var(--ink);
   border-color: var(--muted);
 }
+.sync-refresh-choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.sync-refresh-choice[hidden] {
+  display: none;
+}

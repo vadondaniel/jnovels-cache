@@ -21,7 +21,8 @@ def stale_series_where_clause() -> str:
         (
             ss.unavailable_at IS NULL
             AND (
-                ss.checked_at < ?
+                ss.checked_at <= ?
+                OR ss.source_change_pending = 1
                 OR EXISTS (
                     SELECT 1
                     FROM books AS b
@@ -106,7 +107,15 @@ def get_series_refresh_urls(
     connect_db: ConnectDb,
     stale_days: int,
     limit: int,
+    *,
+    force: bool = False,
 ) -> list[str]:
+    if force:
+        with connect_db() as connection:
+            return [row["series_url"] for row in connection.execute(
+                "SELECT series_url FROM series_status WHERE unavailable_at IS NULL "
+                "ORDER BY checked_at, series_url LIMIT ?", (limit,)
+            )]
     urls = get_stale_series_urls(connect_db, stale_days, limit)
     remaining = limit - len(urls)
     if remaining > 0:

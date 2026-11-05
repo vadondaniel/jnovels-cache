@@ -24,6 +24,8 @@ export const elements = {
   maxPages: document.querySelector("#max-pages"),
   delay: document.querySelector("#delay"),
   syncHelp: document.querySelector("#sync-help"),
+  forceRefreshField: document.querySelector("#force-refresh-field"),
+  forceFullRefresh: document.querySelector("#force-full-refresh"),
   repairDialog: document.querySelector("#repair-dialog"),
   repairSummary: document.querySelector("#repair-summary"),
   repairList: document.querySelector("#repair-list"),

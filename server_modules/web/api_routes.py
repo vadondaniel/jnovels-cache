@@ -147,6 +147,9 @@ def handle_post_api(handler: Any, backend: Any, parsed: urllib.parse.ParseResult
         max_pages = min(max(int(payload.get("max_pages", 20)), 1), max_limit)
         delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
         automatic = payload.get("automatic") is True
+        force_full_refresh = payload.get("force_full_refresh", False)
+        if not isinstance(force_full_refresh, bool) or (force_full_refresh and mode != "series_refresh"):
+            raise ValueError("Invalid force refresh option")
     except (ValueError, TypeError, json.JSONDecodeError):
         handler.send_json(
             {"error": "Invalid sync options."},
@@ -158,7 +161,8 @@ def handle_post_api(handler: Any, backend: Any, parsed: urllib.parse.ParseResult
         handle_auto_catchup(handler, backend, mode, max_pages, delay)
         return
 
-    if not backend.start_sync_thread(start_page, max_pages, delay, mode):
+    options = {"force_full_refresh": True} if force_full_refresh else {}
+    if not backend.start_sync_thread(start_page, max_pages, delay, mode, **options):
         handler.send_json(
             {"error": "A sync is already running."},
             HTTPStatus.CONFLICT,

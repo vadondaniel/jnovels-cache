@@ -30,10 +30,12 @@ export async function loadStatus() {
       if (payload.sync.cache_changed && loadBooksCallback) await loadBooksCallback();
       const message = payload.sync.error
         ? "Sync failed."
-        : payload.sync.cache_changed
+        : payload.sync.source_warnings?.length
+          ? "Sync finished with source-check warnings."
+          : payload.sync.cache_changed
           ? "Cache updated."
           : "No changes found.";
-      showToast(message, Boolean(payload.sync.error));
+      showToast(message, Boolean(payload.sync.error || payload.sync.source_warnings?.length));
     }
   } catch (error) {
     showToast(error.message, true);
@@ -170,6 +172,7 @@ export function bindSyncControls({ loadBooks }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: elements.syncMode.value,
+          force_full_refresh: elements.syncMode.value === "series_refresh" && elements.forceFullRefresh.checked,
           start_page: Number(elements.startPage.value),
           max_pages: Number(elements.maxPages.value),
           delay: Number(elements.delay.value),
