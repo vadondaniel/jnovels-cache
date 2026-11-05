@@ -162,13 +162,14 @@ def handle_post_api(handler: Any, backend: Any, parsed: urllib.parse.ParseResult
         return
 
     options = {"force_full_refresh": True} if force_full_refresh else {}
-    if not backend.start_sync_thread(start_page, max_pages, delay, mode, **options):
+    started = backend.start_sync_thread(start_page, max_pages, delay, mode, **options)
+    if not started:
         handler.send_json(
             {"error": "A sync is already running."},
             HTTPStatus.CONFLICT,
         )
         return
-    handler.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+    handler.send_json(submission_response(started), HTTPStatus.ACCEPTED)
 
 
 def handle_series_preference(handler: Any, backend: Any, payload: dict[str, Any]) -> None:
@@ -195,6 +196,14 @@ def handle_series_preference(handler: Any, backend: Any, payload: dict[str, Any]
     handler.send_json(preference)
 
 
+def submission_response(started: Any) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "queued": getattr(started, "queued", False) is True,
+        "queue_position": getattr(started, "queue_position", 0) if getattr(started, "queued", False) is True else 0,
+    }
+
+
 def handle_series_refresh(handler: Any, backend: Any, payload: dict[str, Any]) -> None:
     series_url = str(payload.get("series_url", "")).strip()
     delay = min(max(float(payload.get("delay", 1.0)), 0.5), 10.0)
@@ -218,7 +227,7 @@ def handle_series_refresh(handler: Any, backend: Any, payload: dict[str, Any]) -
             HTTPStatus.CONFLICT,
         )
         return
-    handler.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+    handler.send_json(submission_response(started), HTTPStatus.ACCEPTED)
 
 
 def handle_repair_entry(handler: Any, backend: Any, payload: dict[str, Any]) -> None:
@@ -244,7 +253,7 @@ def handle_repair_entry(handler: Any, backend: Any, payload: dict[str, Any]) -> 
             HTTPStatus.CONFLICT,
         )
         return
-    handler.send_json({"ok": True}, HTTPStatus.ACCEPTED)
+    handler.send_json(submission_response(started), HTTPStatus.ACCEPTED)
 
 
 def handle_auto_catchup(

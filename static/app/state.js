@@ -12,6 +12,7 @@ export const state = {
   filter: "all",
   filterCounts: {},
   syncNotice: null,
+  completedJobs: null,
   entryUrl: null,
 };
 

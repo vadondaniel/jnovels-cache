@@ -5170,7 +5170,7 @@ class SyncTests(unittest.TestCase):
 
         self.assertEqual(first, (True, None, 0))
         self.assertEqual(second, (False, "rate_limited", 500))
-        start_sync.assert_called_once_with(1, 20, 1.0, "catchup")
+        start_sync.assert_called_once_with(1, 20, 1.0, "catchup", enqueue_if_busy=False)
 
     def test_busy_auto_catchup_does_not_consume_the_cooldown(self):
         with (

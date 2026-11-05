@@ -16,9 +16,13 @@ let loadBooksCallback = null;
 export async function loadStatus() {
   try {
     const payload = await request("/api/status");
+    const completed = payload.sync.completed_jobs || 0;
+    const jobFinished = state.completedJobs !== null && completed !== state.completedJobs;
+    state.completedJobs = completed;
     const wasRunning = elements.syncStatus.classList.contains("is-running");
     updateStatus(payload);
 
+    if (jobFinished && loadBooksCallback) await loadBooksCallback();
     if (payload.sync.running) {
       clearTimeout(state.pollTimer);
       state.pollTimer = setTimeout(loadStatus, 850);
@@ -27,7 +31,7 @@ export async function loadStatus() {
         button.disabled = false;
         button.classList.remove("is-running");
       });
-      if (payload.sync.cache_changed && loadBooksCallback) await loadBooksCallback();
+      if (!jobFinished && payload.sync.cache_changed && loadBooksCallback) await loadBooksCallback();
       const message = payload.sync.error
         ? "Sync failed."
         : payload.sync.source_warnings?.length
@@ -48,13 +52,13 @@ function openSyncOptions() {
 }
 
 async function retryEntry(url) {
-  await request("/api/repair-entry", {
+  const result = await request("/api/repair-entry", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ url, delay: Number(elements.delay.value) }),
   });
   elements.repairDialog.close();
-  showToast("Repair started.");
+  showToast(result.queued ? `Repair queued · position ${result.queue_position}.` : "Repair started.");
   await loadStatus();
 }
 
@@ -167,7 +171,7 @@ export function bindSyncControls({ loadBooks }) {
   elements.syncForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      await request("/api/sync", {
+      const result = await request("/api/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -179,7 +183,7 @@ export function bindSyncControls({ loadBooks }) {
         }),
       });
       elements.syncDialog.close();
-      showToast("Sync started.");
+      showToast(result.queued ? `Sync queued · position ${result.queue_position}.` : "Sync started.");
       await loadStatus();
     } catch (error) {
       showToast(error.message, true);

@@ -116,12 +116,12 @@ export function renderBookCard(
     refreshButton.disabled = true;
     refreshButton.classList.add("is-running");
     try {
-      await request("/api/refresh-series", {
+      const result = await request("/api/refresh-series", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ series_url: seriesActionUrl, delay: 1 }),
       });
-      showToast("Series refresh started.");
+      showToast(result.queued ? `Series refresh queued · position ${result.queue_position}.` : "Series refresh started.");
       await loadStatus();
     } catch (error) {
       refreshButton.disabled = false;

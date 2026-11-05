@@ -5,6 +5,8 @@ import sys
 import threading
 import time
 import urllib.error
+from collections import deque
+from dataclasses import dataclass
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -926,6 +928,8 @@ def cache_content_signature() -> str:
 
 
 sync_lock = threading.Lock()
+sync_queue_lock = threading.RLock()
+sync_jobs: deque[dict[str, Any]] = deque()
 auto_sync_lock = threading.Lock()
 last_auto_sync_started: float | None = None
 sync_state: dict[str, Any] = {
@@ -952,6 +956,8 @@ sync_state: dict[str, Any] = {
     "source_warnings": [],
     "queued_details": 0,
     "queued_series": 0,
+    "queued_jobs": 0,
+    "completed_jobs": 0,
     "request_delay": None,
     "phase_started_at": None,
     "error": None,
@@ -1003,6 +1009,45 @@ def set_sync_started(
     )
 
 
+@dataclass(frozen=True)
+class SyncSubmission:
+    queued: bool = False
+    queue_position: int = 0
+
+
+def _launch_sync_job(job: dict[str, Any]) -> None:
+    """Launch with sync_lock already held and submissions serialized."""
+    set_sync_started(job["start_page"], job["max_pages"], job["delay"], job["mode"])
+    try:
+        thread = threading.Thread(
+            target=run_sync,
+            args=(job["start_page"], job["max_pages"], job["delay"], job["mode"],
+                  job["detail_urls_override"], job["series_urls_override"], job["recovery"], True),
+            name=job["name"],
+            kwargs={"force_full_refresh": job["force_full_refresh"]},
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        sync_state["running"] = False
+        sync_lock.release()
+        raise
+
+
+def _start_next_sync_job() -> None:
+    """Called under sync_queue_lock; preserve a waiting job if launching fails."""
+    if not sync_jobs or not sync_lock.acquire(blocking=False):
+        return
+    job = sync_jobs.popleft()
+    sync_state["queued_jobs"] = len(sync_jobs)
+    try:
+        _launch_sync_job(job)
+    except Exception as exc:
+        sync_jobs.appendleft(job)
+        sync_state["queued_jobs"] = len(sync_jobs)
+        sync_state["error"] = f"Could not start queued job: {exc}"
+
+
 def start_sync_thread(
     start_page: int,
     max_pages: int,
@@ -1014,34 +1059,23 @@ def start_sync_thread(
     *,
     name: str = "jnovels-sync",
     force_full_refresh: bool = False,
-) -> bool:
-    if not sync_lock.acquire(blocking=False):
-        return False
-
-    set_sync_started(start_page, max_pages, delay, mode)
-    thread = threading.Thread(
-        target=run_sync,
-        args=(
-            start_page,
-            max_pages,
-            delay,
-            mode,
-            detail_urls_override,
-            series_urls_override,
-            recovery,
-            True,
-        ),
-        name=name,
-        kwargs={"force_full_refresh": force_full_refresh},
-        daemon=True,
-    )
-    try:
-        thread.start()
-    except Exception:
-        sync_state["running"] = False
-        sync_lock.release()
-        raise
-    return True
+    enqueue_if_busy: bool = True,
+) -> SyncSubmission | bool:
+    job = dict(start_page=start_page, max_pages=max_pages, delay=delay, mode=mode,
+               detail_urls_override=list(detail_urls_override) if detail_urls_override is not None else None,
+               series_urls_override=list(series_urls_override) if series_urls_override is not None else None,
+               recovery=recovery, name=name, force_full_refresh=force_full_refresh)
+    with sync_queue_lock:
+        if sync_jobs or not sync_lock.acquire(blocking=False):
+            if not enqueue_if_busy:
+                return False
+            sync_jobs.append(job)
+            position = len(sync_jobs)
+            sync_state["queued_jobs"] = position
+            _start_next_sync_job()
+            return SyncSubmission(queued=True, queue_position=position)
+        _launch_sync_job(job)
+        return SyncSubmission()
 
 
 def start_auto_catchup(
@@ -1057,7 +1091,7 @@ def start_auto_catchup(
                 retry_after = max(int(AUTO_SYNC_COOLDOWN_SECONDS - elapsed + 0.999), 1)
                 return False, "rate_limited", retry_after
 
-        if not start_sync_thread(1, max_pages, delay, "catchup"):
+        if not start_sync_thread(1, max_pages, delay, "catchup", enqueue_if_busy=False):
             return False, "sync_running", 0
 
         last_auto_sync_started = now
@@ -1151,8 +1185,11 @@ def run_sync(
             force_full_refresh=force_full_refresh,
         )
     finally:
-        sync_state["running"] = False
-        sync_lock.release()
+        with sync_queue_lock:
+            sync_state["completed_jobs"] += 1
+            sync_state["running"] = False
+            sync_lock.release()
+            _start_next_sync_job()
 
 
 def recover_interrupted_sync(checkpoint: dict[str, Any] | None = None) -> bool:

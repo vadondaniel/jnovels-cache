@@ -23,10 +23,10 @@ export function updateStatus(payload) {
         minute: "2-digit",
       })}`
     : "Not synced yet";
-  elements.syncToggle.disabled = sync.running;
+  elements.syncToggle.disabled = false;
+  elements.syncToggle.title = sync.running ? "Queue another sync job" : "Sync cache";
   elements.syncToggle.classList.toggle("is-running", sync.running);
-  elements.cacheHealth.hidden =
-    sync.running || (!health.pending_details && !health.refreshable_series);
+  elements.cacheHealth.hidden = !health.pending_details && !health.refreshable_series;
   elements.repairAll.hidden = !health.pending_details;
   elements.refreshSeries.hidden = !state.cacheCount;
   const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
@@ -48,6 +48,7 @@ export function updateStatus(payload) {
     const detailLines = [];
     const queuedDetails = sync.queued_details || 0;
     const queuedSeries = sync.queued_series || 0;
+    if (sync.queued_jobs) detailLines.push(`${sync.queued_jobs} ${sync.queued_jobs === 1 ? "job" : "jobs"} queued next`);
     if (sync.phase === "source") {
       elements.syncStatusLabel.textContent = `Checking source changes · ${sync.source_service || "metadata"}`;
       detailLines.push(`${sync.source_requests_completed || 0} requests completed`);
@@ -83,6 +84,7 @@ export function updateStatus(payload) {
     if (eta) detailLines.push(eta);
     if (sync.source_series_checked) detailLines.push(`${sync.source_series_checked} series metadata checks completed`);
     detailLines.push(...(sync.source_warnings || []));
+    if (sync.queued_jobs) elements.syncStatusLabel.textContent += ` · ${sync.queued_jobs} queued`;
     elements.syncStatusDetail.textContent = detailLines.join("\n");
     elements.syncStatus.tabIndex = 0;
     elements.syncStatus.classList.add("is-running");
@@ -90,7 +92,7 @@ export function updateStatus(payload) {
     elements.syncStatus.classList.remove("is-running");
     const warnings = sync.source_warnings || [];
     const checked = sync.source_entries_checked || 0;
-    elements.syncStatus.hidden = !sync.error && !warnings.length && !checked && !sync.series_total;
+    elements.syncStatus.hidden = !sync.error && !warnings.length && !checked && !sync.series_total && !sync.queued_jobs;
     elements.syncStatusLabel.textContent = sync.error
       ? `Last sync failed: ${sync.error}`
       : warnings.length
@@ -100,6 +102,7 @@ export function updateStatus(payload) {
       ...(checked ? [`${checked} source entries checked · ${sync.source_series_checked || 0} series metadata checks`] : []),
       `${sync.series_completed || 0} series pages processed · ${sync.series_errors || 0} failed`,
       ...warnings,
+      ...(sync.queued_jobs ? [`${sync.queued_jobs} ${sync.queued_jobs === 1 ? "job" : "jobs"} waiting`] : []),
     ].join("\n");
     if (elements.syncStatus.hidden) elements.syncStatus.removeAttribute("tabindex");
     else elements.syncStatus.tabIndex = 0;
@@ -108,6 +111,8 @@ export function updateStatus(payload) {
 }
 
 export function updateSyncModes(preferredMode = null) {
+  // Status polling must not reset options while a user prepares another job.
+  if (elements.syncDialog.open && !preferredMode) return;
   const currentMode = preferredMode || elements.syncMode.value;
   const pending = state.health.pending_details || 0;
   const refreshableSeries = state.health.refreshable_series || 0;
