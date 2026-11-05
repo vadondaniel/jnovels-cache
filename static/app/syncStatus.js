@@ -26,7 +26,8 @@ export function updateStatus(payload) {
   elements.syncToggle.disabled = false;
   elements.syncToggle.title = sync.running ? "Queue another sync job" : "Sync cache";
   elements.syncToggle.classList.toggle("is-running", sync.running);
-  elements.cacheHealth.hidden = !health.pending_details && !health.refreshable_series;
+  elements.cacheHealth.hidden = Boolean(sync.running || sync.queued_jobs)
+    || (!health.pending_details && !health.refreshable_series);
   elements.repairAll.hidden = !health.pending_details;
   elements.refreshSeries.hidden = !state.cacheCount;
   const failedText = health.failed_retries ? ` · ${health.failed_retries} failed` : "";
